@@ -746,6 +746,19 @@ export const refreshAccessToken = (
 // Refresh-needed predicate
 // ---------------------------------------------------------------------------
 
+/** Whether the stored access token is close enough to its expiry to be
+ *  re-minted BEFORE the next call goes out (the proactive path).
+ *
+ *  A null `expiresAt` means the authorization server never told us when the
+ *  token dies (`expires_in` omitted from the token response). That is not the
+ *  same as "never expires": the token may well be revoked or time out
+ *  upstream. We deliberately do NOT refresh on every call for those — that
+ *  would hammer the AS on connections whose tokens are genuinely long-lived,
+ *  and there is no expiry to be "close to". Instead the reactive path owns
+ *  them: an upstream 401 is the only truthful signal that an unknown-expiry
+ *  token is dead, and `executor.execute` re-mints and retries once on that
+ *  signal. Keep the two paths in sync — narrowing the reactive retry strands
+ *  every null-expiry connection with no way to recover short of a reconnect. */
 export const shouldRefreshToken = (input: {
   readonly expiresAt: number | null;
   readonly now?: number;

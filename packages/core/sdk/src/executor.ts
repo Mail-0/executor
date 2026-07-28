@@ -151,6 +151,7 @@ import {
 } from "./oauth-helpers";
 import { connectionIdentifier } from "./connection-name-identifier";
 import { annotateToolResultOutcome } from "./tool-result";
+import { isUnauthorizedToolFailure } from "./auth-tool-failure";
 
 const PLUGIN_STORAGE_DELETE_KEY_BATCH_SIZE = 90;
 const PLUGIN_STORAGE_CREATE_ROW_BATCH_SIZE = 90;
@@ -1515,10 +1516,15 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         where: (b: AnyCb) => b.and(byOwner(owner)(b), b("slug", "=", slug)),
       });
 
+    /** What drove a refresh: the pre-call expiry check (`proactive`), or an
+     *  upstream 401 on a token we believed was still valid (`reactive`). */
+    type RefreshTrigger = "proactive" | "reactive";
+
     // Perform the actual refresh-token grant and persist the rotated material.
     const performTokenRefresh = (
       row: ConnectionRow,
       provider: CredentialProvider,
+      trigger: RefreshTrigger,
     ): Effect.Effect<string | null, StorageFailure | CredentialResolutionError> =>
       Effect.gen(function* () {
         const owner = row.owner as Owner;
@@ -1668,11 +1674,52 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         });
 
         return token.access_token;
-      });
+      }).pipe(
+        // The refresh path was previously invisible to telemetry: no span, no
+        // log, no metric. When a customer reported "my OAuth just died", there
+        // was no way to answer "did a refresh even fire, and did it work?"
+        // without a repro. Stamp the outcome and the failure KIND — enumerable
+        // identifiers only, never user content or token material.
+        //
+        // The AS's own RFC 6749 §5.2 code is not stamped here: it survives only
+        // inside the error's message, and that message embeds the token
+        // endpoint's response URL and a body preview, so it can't go on a span
+        // attribute. Making that code a queryable dimension needs it lifted to
+        // a typed field on CredentialResolutionError first — worth doing, since
+        // invalid_client (a rotated secret, fleet-wide) currently looks exactly
+        // like a transient server_error from a trace.
+        Effect.tap(() => Effect.annotateCurrentSpan({ "executor.oauth.refresh.outcome": "ok" })),
+        Effect.tapError((error: StorageFailure | CredentialResolutionError) =>
+          Effect.annotateCurrentSpan({
+            "executor.oauth.refresh.outcome": "fail",
+            "executor.oauth.refresh.error": Predicate.isTagged(error, "CredentialResolutionError")
+              ? "CredentialResolutionError"
+              : "StorageFailure",
+            // Whether the AS's refusal was definitive (RFC 6749 invalid_grant →
+            // the refresh token itself is dead) or a transient failure the next
+            // invoke can retry. The split is the actionable half of the signal.
+            ...(Predicate.isTagged(error, "CredentialResolutionError")
+              ? { "executor.oauth.refresh.reauth_required": error.reauthRequired === true }
+              : {}),
+          }),
+        ),
+        Effect.withSpan("executor.oauth.refresh", {
+          attributes: {
+            "executor.integration": String(row.integration),
+            "executor.connection": String(row.name),
+            // Which path drove this refresh: the expiry check ahead of a call,
+            // or an upstream 401 on a token we believed was still good. The
+            // ratio is the health signal — a rising `reactive` share means
+            // tokens are dying earlier than their advertised expiry.
+            "executor.oauth.refresh.trigger": trigger,
+          },
+        }),
+      );
 
     const refreshConnectionToken = (
       row: ConnectionRow,
       provider: CredentialProvider,
+      trigger: RefreshTrigger = "proactive",
     ): Effect.Effect<string | null, StorageFailure | CredentialResolutionError> =>
       // Share a single refresh per connection so concurrent resolves of the same
       // connection all await one refresh-token grant (the AS rotates the refresh
@@ -1681,11 +1728,16 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       // expiry can refresh again.
       Effect.gen(function* () {
         const key = connectionKey(row);
+        // Joining an in-flight grant is correct for BOTH triggers: whatever
+        // that peer mints is newer than the token this fiber just saw rejected,
+        // which is exactly what a reactive retry wants. The gate is cleared on
+        // settle, so a 401 arriving after a refresh completed starts a fresh
+        // grant rather than replaying the stale memoized one.
         const existing = refreshInFlight.get(key);
         if (existing) return yield* existing;
         // `Effect.cached` memoizes the grant onto a deferred: it runs once and
         // replays to every awaiter sharing this entry.
-        const memoized = yield* Effect.cached(performTokenRefresh(row, provider));
+        const memoized = yield* Effect.cached(performTokenRefresh(row, provider, trigger));
         const gated = memoized.pipe(
           Effect.ensuring(Effect.sync(() => refreshInFlight.delete(key))),
         );
@@ -1734,6 +1786,29 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           ),
         ),
       );
+
+    /** Re-mint an OAuth connection's access token unconditionally, ignoring the
+     *  stored expiry. Drives the reactive path: the upstream just rejected the
+     *  token we sent, which is authoritative regardless of what `expires_at`
+     *  claims (revoked server-side, an idle-timeout policy shorter than the
+     *  advertised lifetime, or an expiry the AS never advertised at all).
+     *
+     *  Returns null when the connection can't be re-minted without a human —
+     *  not OAuth-backed, or holding no refresh token — so the caller keeps the
+     *  upstream's own auth failure instead of inventing one. */
+    const forceRefreshConnectionValues = (
+      row: ConnectionRow,
+    ): Effect.Effect<
+      Record<string, string | null> | null,
+      StorageFailure | CredentialResolutionError
+    > =>
+      Effect.gen(function* () {
+        if (row.oauth_client == null || row.refresh_item_id == null) return null;
+        const provider = credentialProviders.get(row.provider);
+        if (!provider) return null;
+        const access = yield* refreshConnectionToken(row, provider, "reactive");
+        return { [PRIMARY_INPUT_VARIABLE]: access };
+      });
 
     /** The primary (`token`) value — the public seam for OAuth + single-input
      *  callers that only ever need one value. */
@@ -3813,27 +3888,58 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         const values = yield* resolveConnectionValues(connectionRow);
         const integrationRow = yield* findIntegrationRow(parsed.integration);
         const grantedScopes = grantedScopesFromRow(connectionRow);
-        const credential: ToolInvocationCredential = {
-          owner: parsed.owner,
-          integration: parsed.integration,
-          connection: parsed.connection,
-          template: AuthTemplateSlug.make(connectionRow.template),
-          value: values[PRIMARY_INPUT_VARIABLE] ?? null,
-          values,
-          config: integrationRow ? decodeJsonColumn(integrationRow.config) : undefined,
-          ...(grantedScopes ? { grantedScopes } : {}),
+        const invokeTool = runtime.plugin.invokeTool;
+        const invokeWith = (
+          resolved: Record<string, string | null>,
+        ): Effect.Effect<unknown, ToolInvocationError> => {
+          const credential: ToolInvocationCredential = {
+            owner: parsed.owner,
+            integration: parsed.integration,
+            connection: parsed.connection,
+            template: AuthTemplateSlug.make(connectionRow.template),
+            value: resolved[PRIMARY_INPUT_VARIABLE] ?? null,
+            values: resolved,
+            config: integrationRow ? decodeJsonColumn(integrationRow.config) : undefined,
+            ...(grantedScopes ? { grantedScopes } : {}),
+          };
+          return wrapInvocationError(
+            invokeTool({
+              ctx: runtime.ctx,
+              toolRow: row,
+              credential,
+              args,
+              elicit: buildElicit(address, args, handler),
+              invokeOptions: options,
+            }),
+          );
         };
 
-        return yield* wrapInvocationError(
-          runtime.plugin.invokeTool({
-            ctx: runtime.ctx,
-            toolRow: row,
-            credential,
-            args,
-            elicit: buildElicit(address, args, handler),
-            invokeOptions: options,
-          }),
+        const first = yield* invokeWith(values);
+        // Reactive refresh. `expires_at` is only ever the AS's ADVERTISED
+        // lifetime; the upstream rejecting the token is the authoritative word
+        // on whether it is still good. The two diverge routinely: server-side
+        // revocation, an identity provider's idle-timeout policy shorter than
+        // the token lifetime, and connections whose AS omitted `expires_in`
+        // entirely (null expiry → the proactive check never fires, so this is
+        // their ONLY route back to a working token short of a reconnect).
+        //
+        // Deliberately narrow: exactly one retry, only on the 401 that means
+        // "this credential is not valid", and only for a connection holding a
+        // refresh token. A 403 is excluded — it means authenticated-but-not-
+        // permitted, and re-minting the same grant returns the same answer.
+        // If the retry also fails its result stands, so a genuinely dead grant
+        // still surfaces the upstream's own auth failure and its reconnect
+        // guidance rather than a masked one.
+        if (!isUnauthorizedToolFailure(first)) return first;
+        const refreshed = yield* forceRefreshConnectionValues(connectionRow).pipe(
+          // A failed re-mint is not this call's failure to report: the upstream
+          // already produced an auth failure with recovery guidance, which is
+          // strictly more actionable than a refresh-plumbing error. Keep it.
+          Effect.catchTag("CredentialResolutionError", () => Effect.succeed(null)),
         );
+        if (!refreshed) return first;
+        yield* Effect.annotateCurrentSpan({ "executor.oauth.refresh.retried": true });
+        return yield* invokeWith(refreshed);
       }).pipe(
         // Expected tool failures (`ToolResult.fail`) resolve through the
         // success channel, so the tracer alone would record them as healthy

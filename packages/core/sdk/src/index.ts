@@ -404,6 +404,7 @@ export {
 } from "./sqlite-oauth-client-gc-migration";
 export {
   authToolFailure,
+  isUnauthorizedToolFailure,
   type AuthToolFailureCode,
   type AuthToolFailureInput,
 } from "./auth-tool-failure";
