@@ -1244,6 +1244,8 @@ const makeRejectingPlugin = (state: {
   /** Reject every token, even a freshly minted one — a dead grant. */
   rejectEverything?: boolean;
   calls: string[];
+  /** Tokens the health probe was run with, mirroring `calls` for the probe path. */
+  probeCalls: string[];
 }) =>
   definePlugin(() => ({
     id: "acme" as const,
@@ -1275,6 +1277,25 @@ const makeRejectingPlugin = (state: {
         }),
       );
     },
+    // The probe authenticates the same way the tool does: revoked (or missing)
+    // tokens get the 401-shaped expired verdict, anything else is healthy.
+    checkHealth: ({ credential }) => {
+      const token = credential.value;
+      state.probeCalls.push(String(token));
+      if (token !== null && !state.rejectEverything && !state.revoked.has(token)) {
+        return Effect.succeed({
+          status: "healthy" as const,
+          httpStatus: 200,
+          checkedAt: Date.now(),
+        });
+      }
+      return Effect.succeed({
+        status: "expired" as const,
+        httpStatus: 401,
+        checkedAt: Date.now(),
+        detail: "Upstream rejected credentials with HTTP 401.",
+      });
+    },
     extension: (ctx) => ({
       seed: () => ctx.core.integrations.register({ slug: INTEG, description: "Acme", config: {} }),
     }),
@@ -1293,6 +1314,7 @@ const connectRejecting = (options?: { readonly tokenExpiresInSeconds?: number })
       revoked: new Set<string>(),
       rejectEverything: false,
       calls: [] as string[],
+      probeCalls: [] as string[],
     };
     const issuedLatest = Effect.gen(function* () {
       const issued = yield* server.issuedAccessTokens;
@@ -1546,6 +1568,95 @@ describe("reactive OAuth refresh on upstream 401", () => {
 
         expect(result).toMatchObject({ ok: false, error: { status: 401 } });
         expect(state.calls).toHaveLength(1);
+        expect(refreshGrants(yield* server.requests)).toHaveLength(0);
+      }),
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Reactive refresh on the health-probe path. The probe and the invoke path must
+// share one recovery story: without it, a connection whose access token died
+// early reports `expired` from checkHealth while the very next tool call
+// refreshes and succeeds, so anything acting on the probe verdict sends the
+// user back through consent for a connection that is actually fine.
+// ---------------------------------------------------------------------------
+
+describe("reactive OAuth refresh on a health-probe 401", () => {
+  type RejectingHarness = Effect.Success<ReturnType<typeof connectRejecting>>;
+  const declareProbe = (config: RejectingHarness["config"]) =>
+    Effect.promise(() =>
+      config.db.updateMany("integration", {
+        where: (b) => b("slug", "=", String(INTEG)),
+        set: { health_check: { operation: "whoami" } },
+      }),
+    );
+
+  const CHECK_REF = {
+    owner: "org" as const,
+    integration: INTEG,
+    name: ConnectionName.make("mine"),
+  };
+
+  it.effect("re-mints and re-probes once, reporting healthy for a live grant", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { server, state, executor, config } = yield* connectRejecting();
+        yield* declareProbe(config);
+        yield* revokeIssuedSoFar(server, state);
+        yield* server.clearRequests;
+
+        const result = yield* executor.connections.checkHealth(CHECK_REF);
+
+        expect(result.status).toBe("healthy");
+        // Probed twice with different tokens: the rejected one, then the re-mint.
+        expect(state.probeCalls).toHaveLength(2);
+        expect(state.probeCalls[0]).not.toBe(state.probeCalls[1]);
+        expect(refreshGrants(yield* server.requests)).toHaveLength(1);
+
+        // The verdict persisted on the row is the recovered one.
+        const connection = yield* executor.connections.get(CHECK_REF);
+        expect(connection?.lastHealth).toMatchObject({ status: "healthy" });
+      }),
+    ),
+  );
+
+  it.effect("keeps the probe's own expired verdict when the re-minted token is also rejected", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { server, state, executor, config } = yield* connectRejecting();
+        yield* declareProbe(config);
+        state.rejectEverything = true;
+        yield* server.clearRequests;
+
+        const result = yield* executor.connections.checkHealth(CHECK_REF);
+
+        expect(result.status).toBe("expired");
+        // Probed twice, refreshed once, then stopped: no loop.
+        expect(state.probeCalls).toHaveLength(2);
+        expect(refreshGrants(yield* server.requests)).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.effect("does not refresh when the connection holds no refresh token", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { server, state, executor, config } = yield* connectRejecting();
+        yield* declareProbe(config);
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("name", "=", "mine"),
+            set: { refresh_item_id: null },
+          }),
+        );
+        yield* revokeIssuedSoFar(server, state);
+        yield* server.clearRequests;
+
+        const result = yield* executor.connections.checkHealth(CHECK_REF);
+
+        expect(result.status).toBe("expired");
+        expect(state.probeCalls).toHaveLength(1);
         expect(refreshGrants(yield* server.requests)).toHaveLength(0);
       }),
     ),

@@ -2944,28 +2944,45 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         }
 
         const result = yield* Effect.gen(function* () {
-          const values = yield* resolveConnectionValues(connectionRow);
           const record = rowToIntegrationRecord(
             integrationRow,
             describeAuthMethodsForRow(integrationRow),
           );
           const grantedScopes = grantedScopesFromRow(connectionRow);
-          const credential: ToolInvocationCredential = {
-            owner: connectionRow.owner as Owner,
-            integration: ref.integration,
-            connection: ConnectionName.make(connectionRow.name),
-            template: AuthTemplateSlug.make(connectionRow.template),
-            value: values[PRIMARY_INPUT_VARIABLE] ?? null,
-            values,
-            config: record.config,
-            ...(grantedScopes ? { grantedScopes } : {}),
+          const probeWith = (values: Record<string, string | null>) => {
+            const credential: ToolInvocationCredential = {
+              owner: connectionRow.owner as Owner,
+              integration: ref.integration,
+              connection: ConnectionName.make(connectionRow.name),
+              template: AuthTemplateSlug.make(connectionRow.template),
+              value: values[PRIMARY_INPUT_VARIABLE] ?? null,
+              values,
+              config: record.config,
+              ...(grantedScopes ? { grantedScopes } : {}),
+            };
+            // Core resolves the declared spec (its own column) and hands it to
+            // the plugin; plugins no longer read it out of their config.
+            return foldPluginFailure(
+              check({ ctx: runtime.ctx, integration: record, credential, spec }),
+              `Health check for connection "${ref.name}" failed.`,
+            );
           };
-          // Core resolves the declared spec (its own column) and hands it to the
-          // plugin; plugins no longer read it out of their config.
-          return yield* foldPluginFailure(
-            check({ ctx: runtime.ctx, integration: record, credential, spec }),
-            `Health check for connection "${ref.name}" failed.`,
+          const values = yield* resolveConnectionValues(connectionRow);
+          const first = yield* probeWith(values);
+          // Reactive refresh, mirroring the invoke path: an upstream 401 on the
+          // probe means the stored access token is dead regardless of what
+          // `expires_at` claims. Without this, a connection whose token expired
+          // early reports `expired` here while the very next tool invocation
+          // refreshes and succeeds, so callers acting on the probe verdict
+          // needlessly send the user back through consent. Exactly one re-mint
+          // and one re-probe; 403 stays a real verdict (authenticated but not
+          // permitted), and a failed re-mint keeps the probe's own result.
+          if (first.httpStatus !== 401) return first;
+          const refreshed = yield* forceRefreshConnectionValues(connectionRow).pipe(
+            Effect.catchTag("CredentialResolutionError", () => Effect.succeed(null)),
           );
+          if (!refreshed) return first;
+          return yield* probeWith({ ...values, ...refreshed });
         }).pipe(Effect.catchTag("CredentialResolutionError", healthFromCredentialResolutionError));
         // Persist the verdict on the connection row so the accounts list shows
         // alive/expired at a glance. Best-effort: a write failure must not turn
