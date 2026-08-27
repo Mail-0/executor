@@ -305,6 +305,13 @@ export {
   type OAuthService,
 } from "./oauth-client";
 
+export {
+  connectionNeedsReconsent,
+  requestedOAuthScopesForConnection,
+  unrequestedDeclaredOAuthScopes,
+  type ReconsentConnectionView,
+} from "./oauth-reconsent";
+
 // NOTE: the OAuth 2.1 implementation helpers (`./oauth-helpers`,
 // `makeOAuthService` in `./oauth-service`, discovery in `./oauth-discovery`)
 // are SDK-internal — consumed only by `createExecutor`. The hosted HTTP client

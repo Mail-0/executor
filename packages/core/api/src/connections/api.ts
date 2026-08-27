@@ -59,6 +59,12 @@ const ConnectionResponse = Schema.Struct({
   oauthClientOwner: Schema.NullOr(Owner),
   oauthScope: Schema.NullOr(Schema.String),
   missingOAuthScopes: Schema.Array(Schema.String),
+  // True when the integration DECLARES an oauth scope this connection's grant
+  // never requested (a spec widened, a service was added, an auth template was
+  // re-derived): the connection must re-run the flow to cover it. Computed per
+  // response from the current catalog, not a stored column — unlike
+  // `missingOAuthScopes`, which is a snapshot of the original grant.
+  needsReconsent: Schema.Boolean,
   // Last persisted health-check verdict (written by every checkHealth run),
   // so the list can show alive/expired at a glance without probing.
   lastHealth: Schema.NullOr(HealthCheckResult),
