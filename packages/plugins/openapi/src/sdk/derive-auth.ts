@@ -167,12 +167,79 @@ export const detectedAuthenticationTemplates = (
       oauthTemplateFromPreset(
         preset,
         baseUrl,
-        AuthTemplateSlug.make(`oauth-${preset.securitySchemeName}`),
+        oauthTemplateSlugForScheme(preset.securitySchemeName),
         scopes,
       ),
     );
   }
   return templates;
+};
+
+// ---------------------------------------------------------------------------
+// Re-deriving oauth scopes for an integration whose spec changed in place.
+// `addSpec` freezes the declared scopes into the stored oauth template, so a
+// spec that later narrows or widens its security scheme has no effect on what
+// consent asks for: the template is the only thing the connect flow reads.
+// This maps the new spec's presets back onto the EXISTING templates by scheme
+// slug, rewriting `scopes` and nothing else — the credential a connection
+// already holds, its endpoints, and every custom/apiKey method survive.
+//
+// Deliberately conservative in two directions: a preset with no matching
+// template does NOT become a new auth method (adding one changes what the
+// connect modal offers, which is an add-time decision), and a template whose
+// scheme the new spec dropped keeps its scopes rather than being emptied into
+// an unusable consent request.
+// ---------------------------------------------------------------------------
+
+export const oauthTemplateSlugForScheme = (securitySchemeName: string): AuthTemplateSlug =>
+  AuthTemplateSlug.make(`oauth-${securitySchemeName}`);
+
+export interface RederivedOAuthScopes {
+  readonly templates: readonly Authentication[];
+  /** Scopes newly declared across every rewritten template, sorted. */
+  readonly addedScopes: readonly string[];
+  /** Scopes the new spec no longer declares, sorted. */
+  readonly removedScopes: readonly string[];
+  /** Whether any template's scope set actually changed. */
+  readonly changed: boolean;
+}
+
+export const rederiveOAuthScopes = (
+  templates: readonly Authentication[],
+  oauth2Presets: readonly OAuth2Preset[],
+): RederivedOAuthScopes => {
+  const scopesBySlug = new Map<string, readonly string[]>();
+  for (const preset of oauth2Presets) {
+    scopesBySlug.set(
+      String(oauthTemplateSlugForScheme(preset.securitySchemeName)),
+      resolvedOAuthScopes(Object.keys(preset.scopes), preset.identityScopes),
+    );
+  }
+
+  const added = new Set<string>();
+  const removed = new Set<string>();
+  let changed = false;
+  const next = templates.map((template: Authentication): Authentication => {
+    if (template.kind !== "oauth2") return template;
+    const nextScopes = scopesBySlug.get(String(template.slug));
+    if (nextScopes === undefined) return template;
+    const previous = new Set(template.scopes ?? []);
+    const declared = new Set(nextScopes);
+    const gained = [...declared].filter((scope: string) => !previous.has(scope));
+    const lost = [...previous].filter((scope: string) => !declared.has(scope));
+    if (gained.length === 0 && lost.length === 0) return template;
+    for (const scope of gained) added.add(scope);
+    for (const scope of lost) removed.add(scope);
+    changed = true;
+    return { ...template, scopes: [...declared] };
+  });
+
+  return {
+    templates: changed ? next : templates,
+    addedScopes: [...added].sort(),
+    removedScopes: [...removed].sort(),
+    changed,
+  };
 };
 
 export const firstBaseUrlForPreview = (preview: PreviewAuthMetadata): string => {
