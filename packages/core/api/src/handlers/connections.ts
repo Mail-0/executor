@@ -4,10 +4,13 @@ import { Effect } from "effect";
 import { capture } from "@executor-js/api";
 import {
   ConnectionNotFoundError,
+  connectionNeedsReconsent,
+  type AuthMethodDescriptor,
   type Connection,
   type ConnectionRef,
   type CreateConnectionInput,
   type HealthCheckResult,
+  type IntegrationSlug,
   type Tool,
   type ValidateConnectionInput,
 } from "@executor-js/sdk";
@@ -15,7 +18,25 @@ import {
 import { ExecutorApi } from "../api";
 import { ExecutorService } from "../services";
 
-const toResponse = (c: Connection) => ({
+/** Reads the integration's declared auth methods once per slug — a list spans
+ *  one integration in the common case, and a whole-catalog list would otherwise
+ *  re-read the same row per connection. An integration removed mid-list reads
+ *  as "declares nothing", which cannot flag a reconsent. */
+const declaredAuthMethodsReader = Effect.gen(function* () {
+  const executor = yield* ExecutorService;
+  const cache = new Map<string, readonly AuthMethodDescriptor[]>();
+  return (slug: IntegrationSlug) =>
+    Effect.gen(function* () {
+      const cached = cache.get(String(slug));
+      if (cached !== undefined) return cached;
+      const integration = yield* executor.integrations.get(slug);
+      const methods = integration?.authMethods ?? [];
+      cache.set(String(slug), methods);
+      return methods;
+    });
+});
+
+const toResponse = (c: Connection, authMethods: readonly AuthMethodDescriptor[]) => ({
   owner: c.owner,
   name: c.name,
   integration: c.integration,
@@ -29,6 +50,18 @@ const toResponse = (c: Connection) => ({
   oauthClientOwner: c.oauthClientOwner ?? null,
   oauthScope: c.oauthScope ?? null,
   missingOAuthScopes: c.missingOAuthScopes ?? [],
+  // Computed against the integration's CURRENT declarations, so a spec whose
+  // scopes widened after this grant was minted is visible to headless callers
+  // without re-deriving the comparison client-side.
+  needsReconsent: connectionNeedsReconsent(
+    {
+      oauthClient: c.oauthClient ?? null,
+      template: String(c.template),
+      oauthScope: c.oauthScope ?? null,
+      missingOAuthScopes: c.missingOAuthScopes ?? [],
+    },
+    authMethods,
+  ),
   lastHealth: c.lastHealth ?? null,
 });
 
@@ -57,11 +90,16 @@ export const ConnectionsHandlers = HttpApiBuilder.group(ExecutorApi, "connection
       capture(
         Effect.gen(function* () {
           const executor = yield* ExecutorService;
+          const authMethodsFor = yield* declaredAuthMethodsReader;
           const connections = yield* executor.connections.list({
             integration: query.integration,
             owner: query.owner,
           });
-          return connections.map(toResponse);
+          return yield* Effect.forEach(connections, (connection: Connection) =>
+            Effect.map(authMethodsFor(connection.integration), (methods) =>
+              toResponse(connection, methods),
+            ),
+          );
         }),
       ),
     )
@@ -72,7 +110,8 @@ export const ConnectionsHandlers = HttpApiBuilder.group(ExecutorApi, "connection
           // The payload is the discriminated `CreateConnectionInput` union
           // (`{ value }` | `{ values }` | `{ from }`); pass it through verbatim.
           const created = yield* executor.connections.create(payload as CreateConnectionInput);
-          return toResponse(created);
+          const authMethodsFor = yield* declaredAuthMethodsReader;
+          return toResponse(created, yield* authMethodsFor(created.integration));
         }),
       ),
     )
@@ -93,7 +132,8 @@ export const ConnectionsHandlers = HttpApiBuilder.group(ExecutorApi, "connection
               name: path.name,
             });
           }
-          return toResponse(connection);
+          const authMethodsFor = yield* declaredAuthMethodsReader;
+          return toResponse(connection, yield* authMethodsFor(connection.integration));
         }),
       ),
     )
@@ -114,7 +154,8 @@ export const ConnectionsHandlers = HttpApiBuilder.group(ExecutorApi, "connection
                 : {}),
             },
           );
-          return toResponse(updated);
+          const authMethodsFor = yield* declaredAuthMethodsReader;
+          return toResponse(updated, yield* authMethodsFor(updated.integration));
         }),
       ),
     )

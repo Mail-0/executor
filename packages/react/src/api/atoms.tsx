@@ -399,6 +399,9 @@ export const addConnectionOptimistic = Atom.family((owner: Owner) =>
             oauthClientOwner: null,
             oauthScope: null,
             missingOAuthScopes: [],
+            // A connection being created is granting the current declarations,
+            // so it can never need reconsent; reconciled on refresh.
+            needsReconsent: false,
             lastHealth: null,
           };
           return [optimistic, ...rows];
