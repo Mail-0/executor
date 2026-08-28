@@ -39,7 +39,11 @@ import {
   previewSpecText,
   type SpecPreview,
 } from "./preview";
-import { deriveAuthenticationTemplateFromPreview, firstBaseUrlForPreview } from "./derive-auth";
+import {
+  deriveAuthenticationTemplateFromPreview,
+  firstBaseUrlForPreview,
+  rederiveOAuthScopes,
+} from "./derive-auth";
 import { openApiPresets } from "./presets";
 import { makeDefaultOpenapiStore, type OpenapiStore } from "./store";
 import {
@@ -135,6 +139,13 @@ export interface UpdateSpecResult {
   readonly toolCount: number;
   readonly addedTools: readonly string[];
   readonly removedTools: readonly string[];
+  /** Scopes the integration now declares and did not before, across every
+   *  oauth template re-derived by `rederiveOAuthScopes`. Empty when the caller
+   *  did not ask for re-derivation. */
+  readonly addedScopes: readonly string[];
+  /** Scopes the updated spec no longer declares. A connection granted them
+   *  keeps them until it is re-consented — the grant lives at the provider. */
+  readonly removedScopes: readonly string[];
 }
 
 export interface OpenApiUpdateSpecInput {
@@ -143,6 +154,15 @@ export interface OpenApiUpdateSpecInput {
   readonly spec?: OpenApiSpecInput;
   /** Replacement override list. Omit to keep existing overrides; pass [] to clear them. */
   readonly specOverrides?: SpecOverrides;
+  /** Re-derive the scopes of the integration's spec-derived oauth templates
+   *  from the updated document, matching template to security scheme by slug.
+   *  Off by default: an in-place spec update otherwise leaves the consent
+   *  request frozen at whatever the spec declared when it was added, so a spec
+   *  that narrows (or adds) scopes cannot reach existing connections without
+   *  removing the integration and re-adding it, which also drops the
+   *  credential. Only `scopes` is rewritten; endpoints, apiKey methods and
+   *  user-configured `custom_*` methods are untouched. */
+  readonly rederiveOAuthScopes?: boolean;
 }
 
 export interface OpenApiPluginExtension {
@@ -986,6 +1006,21 @@ export const openApiPlugin = definePlugin<
           const previousOperations = yield* ctx.storage.listOperations(rawSlug);
           const previousNames = new Set(previousOperations.map((op) => op.toolName));
 
+          // Opt-in: bring the stored oauth templates' scopes back in line with
+          // the spec's security schemes. Without this the consent request stays
+          // frozen at add time, so a narrowed spec never reaches the users
+          // already connected under the wide one. Changed scopes are what the
+          // reconsent comparison (integration-declared vs the connection's
+          // granted `oauth_scope`) reads, so the affected connections start
+          // asking to reconnect instead of silently keeping the old grant.
+          const rederived =
+            input?.rederiveOAuthScopes === true
+              ? rederiveOAuthScopes(
+                  current.authenticationTemplate ?? [],
+                  (yield* previewSpecText(resolved.specText)).oauth2Presets,
+                )
+              : undefined;
+
           // The resolved spec text lives in the plugin blob store keyed by its
           // content hash (`spec/<hash>`); the config carries only the hash. Put
           // the blob outside the transaction - re-puts are idempotent and an
@@ -1013,6 +1048,7 @@ export const openApiPlugin = definePlugin<
               ? { specUrl: resolved.specUrl ?? specInputToSpecUrl(specInput) }
               : {}),
             ...(nextOverrides.length > 0 ? { specOverrides: nextOverrides, sourceSpecHash } : {}),
+            ...(rederived?.changed ? { authenticationTemplate: rederived.templates } : {}),
           };
 
           yield* ctx.transaction(
@@ -1069,6 +1105,8 @@ export const openApiPlugin = definePlugin<
             toolCount: nextNames.size,
             addedTools: [...nextNames].filter((name) => !previousNames.has(name)).sort(),
             removedTools: [...previousNames].filter((name) => !nextNames.has(name)).sort(),
+            addedScopes: rederived?.addedScopes ?? [],
+            removedScopes: rederived?.removedScopes ?? [],
           } satisfies UpdateSpecResult;
         }).pipe(
           Effect.withSpan("openapi.plugin.update_spec", {

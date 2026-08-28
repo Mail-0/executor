@@ -133,12 +133,17 @@ export const OpenApiHandlers = HttpApiBuilder.group(ExecutorApiWithOpenApi, "ope
             ...(payload.specOverrides !== undefined
               ? { specOverrides: payload.specOverrides }
               : {}),
+            ...(payload.rederiveOAuthScopes !== undefined
+              ? { rederiveOAuthScopes: payload.rederiveOAuthScopes }
+              : {}),
           });
           return {
             slug: result.slug,
             toolCount: result.toolCount,
             addedTools: [...result.addedTools],
             removedTools: [...result.removedTools],
+            addedScopes: [...result.addedScopes],
+            removedScopes: [...result.removedScopes],
           };
         }),
       ),

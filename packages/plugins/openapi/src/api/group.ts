@@ -120,6 +120,11 @@ const AddSpecResponse = Schema.Struct({
 const UpdateSpecPayload = Schema.Struct({
   spec: Schema.optional(OpenApiSpecInputPayload),
   specOverrides: Schema.optional(SpecOverridesSchema),
+  /** Re-derive the spec-derived oauth templates' scopes from the updated
+   *  document. Off by default: the stored template, not the spec, is what the
+   *  connect flow reads, so a spec that narrows or widens its security scheme
+   *  otherwise leaves consent frozen at add time. */
+  rederiveOAuthScopes: Schema.optional(Schema.Boolean),
 });
 
 const UpdateSpecResponse = Schema.Struct({
@@ -129,6 +134,11 @@ const UpdateSpecResponse = Schema.Struct({
   addedTools: Schema.Array(Schema.String),
   /** Tool names the new spec no longer defines. */
   removedTools: Schema.Array(Schema.String),
+  /** Scopes now declared that were not before. Empty unless the request asked
+   *  for `rederiveOAuthScopes`. */
+  addedScopes: Schema.Array(Schema.String),
+  /** Scopes the updated spec no longer declares. */
+  removedScopes: Schema.Array(Schema.String),
 });
 
 const IntegrationView = Schema.Struct({
