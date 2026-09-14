@@ -100,3 +100,40 @@ describe("pausedExecutionCount", () => {
     }),
   );
 });
+
+describe("tool call log", () => {
+  // A runtime that calls two tools: one that resolves and one the executor
+  // reports as not found (an expected failure on the success channel).
+  const callingExecutor: CodeExecutor<FakeRuntimeError> = {
+    execute: (_code, tools) =>
+      Effect.gen(function* () {
+        const first = yield* tools
+          .invoke({ path: "missing.tool", args: { q: 1 } })
+          .pipe(Effect.orElseSucceed(() => null));
+        const second = yield* tools
+          .invoke({ path: "search", args: { query: "nothing" } })
+          .pipe(Effect.orElseSucceed(() => null));
+        return { result: [first, second], logs: [] } satisfies ExecuteResult;
+      }),
+  };
+
+  it.effect("reports every sandbox tool call with its input and outcome", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: callingExecutor });
+      const result = yield* engine.execute("code", {
+        onElicitation: () => Effect.succeed({ action: "accept" }),
+      });
+      const calls = result.toolCalls ?? [];
+      expect(calls.map((call) => call.path)).toEqual(["missing.tool", "search"]);
+      expect(calls[0]).toMatchObject({
+        ok: false,
+        input: { q: 1 },
+        error: "Tool not found: missing.tool",
+      });
+      expect(calls[1]).toMatchObject({ ok: true, input: { query: "nothing" } });
+      expect(typeof calls[0]?.durationMs).toBe("number");
+      expect(Number.isNaN(Date.parse(calls[0]?.startedAt ?? ""))).toBe(false);
+    }),
+  );
+});

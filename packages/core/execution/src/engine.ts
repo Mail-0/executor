@@ -2,15 +2,21 @@ import { Deferred, Effect, Fiber, Predicate, Queue } from "effect";
 import type * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 
-import type {
-  Executor,
-  InvokeOptions,
-  ElicitationResponse,
-  ElicitationHandler,
-  ElicitationContext,
+import {
+  isToolResult,
+  type Executor,
+  type InvokeOptions,
+  type ElicitationResponse,
+  type ElicitationHandler,
+  type ElicitationContext,
 } from "@executor-js/sdk/core";
 import { CodeExecutionError } from "@executor-js/codemode-core";
-import type { CodeExecutor, ExecuteResult, SandboxToolInvoker } from "@executor-js/codemode-core";
+import type {
+  CodeExecutor,
+  ExecuteResult,
+  ExecuteToolCall,
+  SandboxToolInvoker,
+} from "@executor-js/codemode-core";
 
 import {
   defaultToolDiscoveryProvider,
@@ -67,11 +73,101 @@ const acceptAllHandler: ElicitationHandler = () => Effect.succeed({ action: "acc
 // ---------------------------------------------------------------------------
 
 const MAX_PREVIEW_CHARS = 30_000;
+const MAX_TOOL_CALL_VALUE_CHARS = 8_000;
 
 const truncate = (value: string, max: number): string =>
   value.length > max
     ? `${value.slice(0, max)}\n... [truncated ${value.length - max} chars]`
     : value;
+
+// A tool call's input or output as it goes into the call log: the value
+// itself when it serializes small, its truncated JSON text otherwise.
+const boundedValue = (value: unknown): unknown => {
+  const text = JSON.stringify(value);
+  return text === undefined || text.length <= MAX_TOOL_CALL_VALUE_CHARS
+    ? value
+    : truncate(text, MAX_TOOL_CALL_VALUE_CHARS);
+};
+
+/**
+ * Wraps a sandbox tool invoker so every `tools.<path>(args)` call the code
+ * makes is appended to `calls`, which the execute paths hand back as
+ * `ExecuteResult.toolCalls`. Failures on the invoker's error channel are
+ * recorded and re-raised unchanged.
+ */
+const recordToolCalls = (
+  invoker: SandboxToolInvoker,
+): { readonly invoker: SandboxToolInvoker; readonly calls: ExecuteToolCall[] } => {
+  const calls: ExecuteToolCall[] = [];
+  const record = (input: {
+    readonly path: string;
+    readonly args: unknown;
+    readonly startedAt: number;
+    readonly ok: boolean;
+    readonly output: unknown;
+    readonly error?: string;
+  }) => {
+    calls.push({
+      path: input.path,
+      startedAt: new Date(input.startedAt).toISOString(),
+      durationMs: Date.now() - input.startedAt,
+      ok: input.ok,
+      input: boundedValue(input.args),
+      output: boundedValue(input.output),
+      ...(input.error !== undefined ? { error: input.error } : {}),
+    });
+  };
+  return {
+    calls,
+    invoker: {
+      invoke: ({ path, args }) =>
+        Effect.suspend(() => {
+          const startedAt = Date.now();
+          return invoker.invoke({ path, args }).pipe(
+            Effect.tap((output) =>
+              Effect.sync(() => {
+                const failed = isToolResult(output) && !output.ok;
+                record({
+                  path,
+                  args,
+                  startedAt,
+                  ok: !failed,
+                  output,
+                  ...(failed ? { error: output.error.message } : {}),
+                });
+              }),
+            ),
+            // The failure itself ends the execution and surfaces as
+            // `ExecuteResult.error`; the log only marks the call as failed.
+            Effect.tapError(() =>
+              Effect.sync(() =>
+                record({
+                  path,
+                  args,
+                  startedAt,
+                  ok: false,
+                  output: null,
+                  error: "Tool call failed",
+                }),
+              ),
+            ),
+          );
+        }),
+    },
+  };
+};
+
+const executeRecorded = <E extends Cause.YieldableError>(
+  codeExecutor: CodeExecutor<E>,
+  code: string,
+  invoker: SandboxToolInvoker,
+): Effect.Effect<ExecuteResult, E> => {
+  const recorded = recordToolCalls(invoker);
+  return codeExecutor.execute(code, recorded.invoker).pipe(
+    Effect.map((result) => ({ ...result, toolCalls: recorded.calls })),
+    Effect.withSpan("executor.code.exec"),
+  );
+};
 
 export const formatExecuteResult = (
   result: ExecuteResult,
@@ -107,6 +203,7 @@ export const formatExecuteResult = (
         error: result.error,
         ...emittedField,
         logs: result.logs ?? [],
+        toolCalls: result.toolCalls ?? [],
       },
       isError: true,
     };
@@ -125,6 +222,7 @@ export const formatExecuteResult = (
       result: result.result ?? null,
       ...emittedField,
       logs: result.logs ?? [],
+      toolCalls: result.toolCalls ?? [],
     },
     isError: false,
   };
@@ -568,9 +666,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
       { onElicitation: elicitationHandler },
       toolDiscoveryProvider,
     );
-    fiber = yield* Effect.forkDetach(
-      codeExecutor.execute(code, invoker).pipe(Effect.withSpan("executor.code.exec")),
-    );
+    fiber = yield* Effect.forkDetach(executeRecorded(codeExecutor, code, invoker));
 
     // When the fiber settles on its own (sandbox timeout, failure) while
     // pauses are still outstanding, drop them: getPausedExecution must not
@@ -670,7 +766,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
       },
       toolDiscoveryProvider,
     );
-    return yield* codeExecutor.execute(code, invoker).pipe(Effect.withSpan("executor.code.exec"));
+    return yield* executeRecorded(codeExecutor, code, invoker);
   });
 
   return {

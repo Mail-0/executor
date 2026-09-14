@@ -37,12 +37,28 @@ export type ExecuteOutputItem =
       readonly content: unknown;
     };
 
+/**
+ * One `tools.<path>(args)` call the sandboxed code made, as recorded by the
+ * host for tracing. `input`/`output` are the call's values, bounded in size;
+ * credentials never pass through the invoker, so they never appear here.
+ */
+export type ExecuteToolCall = {
+  readonly path: string;
+  readonly startedAt: string;
+  readonly durationMs: number;
+  readonly ok: boolean;
+  readonly input: unknown;
+  readonly output: unknown;
+  readonly error?: string;
+};
+
 /** Result of executing code in a sandbox */
 export type ExecuteResult = {
   result: unknown;
   output?: ExecuteOutputItem[];
   error?: string;
   logs?: string[];
+  toolCalls?: ExecuteToolCall[];
 };
 
 /**
