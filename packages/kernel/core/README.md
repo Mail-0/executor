@@ -35,6 +35,22 @@ export const makeMyRuntime = (): CodeExecutor => ({
 
 The runtime is passed a `SandboxToolInvoker` that bridges sandbox-side tool calls back to the executor. The sandbox-visible API is whatever you decide — `@executor-js/runtime-quickjs` exposes a `tools` proxy object; a runtime targeting Cloudflare Workers might use something else.
 
+The execution engine records every call that goes through the invoker and returns them as `ExecuteResult.toolCalls`, one `ExecuteToolCall` per call:
+
+```ts
+type ExecuteToolCall = {
+  path: string; // "crm.user.default.create"
+  startedAt: string; // ISO timestamp
+  durationMs: number;
+  ok: boolean;
+  input: unknown; // arguments; JSON above 8k chars is truncated to text
+  output: unknown; // result, bounded the same way
+  error?: string; // present when ok is false
+};
+```
+
+The MCP host surfaces the same list as `structuredContent.toolCalls` on `execute` and `resume`, so a caller can render each sandbox tool call as a child span of the run. Credentials are resolved inside the executor's plugins and never appear in `input` or `output`.
+
 ## Status
 
 Pre-`1.0`. APIs may still change between beta releases. Part of the [executor monorepo](https://github.com/UsefulSoftwareCo/executor).
