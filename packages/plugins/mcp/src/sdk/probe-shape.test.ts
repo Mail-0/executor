@@ -309,6 +309,72 @@ describe("probeMcpEndpointShape", () => {
     ),
   );
 
+  it.effect("classifies a 2xx SSE handshake as unauth-OK MCP", () =>
+    withServer(
+      () =>
+        HttpServerResponse.text(
+          `event: message\ndata: ${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2025-06-18", capabilities: {} },
+          })}\n\n`,
+          { status: 200, contentType: "text/event-stream" },
+        ),
+      (endpoint) =>
+        Effect.gen(function* () {
+          const result = yield* probeMcpEndpointShape(endpoint);
+          expect(result).toEqual({ kind: "mcp", requiresAuth: false });
+        }),
+    ),
+  );
+
+  // mcp.builders.gojinko.com shape: an unauthenticated POST gets a clean
+  // 401, but once any Authorization header is present the server answers
+  // 200 + SSE and puts its rejection inside the JSON-RPC envelope. Read as
+  // unauth-OK, the add flow tells the user the endpoint has no discoverable
+  // tools instead of that the credential was rejected.
+  it.effect("classifies a 2xx SSE envelope carrying an auth error as MCP+auth", () =>
+    withServer(
+      () =>
+        HttpServerResponse.text(
+          `event: message\ndata: ${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            error: {
+              code: -32603,
+              message:
+                "MCP error -32603: Version negotiation failed: the server requires authorization (HTTP 401)",
+            },
+          })}\n\n`,
+          { status: 200, contentType: "text/event-stream" },
+        ),
+      (endpoint) =>
+        Effect.gen(function* () {
+          const result = yield* probeMcpEndpointShape(endpoint);
+          expect(result).toEqual({ kind: "mcp", requiresAuth: true });
+        }),
+    ),
+  );
+
+  it.effect("keeps a non-auth 2xx SSE error as unauth-OK MCP", () =>
+    withServer(
+      () =>
+        HttpServerResponse.text(
+          `event: message\ndata: ${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: -32602, message: "Unsupported protocol version" },
+          })}\n\n`,
+          { status: 200, contentType: "text/event-stream" },
+        ),
+      (endpoint) =>
+        Effect.gen(function* () {
+          const result = yield* probeMcpEndpointShape(endpoint);
+          expect(result).toEqual({ kind: "mcp", requiresAuth: false });
+        }),
+    ),
+  );
+
   it.effect("rejects 2xx with non-JSON-RPC JSON body as wrong-shape", () =>
     withServer(
       () => HttpServerResponse.jsonUnsafe({ ok: true, data: { id: "x" } }),

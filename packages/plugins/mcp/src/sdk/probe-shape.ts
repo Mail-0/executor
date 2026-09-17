@@ -17,7 +17,9 @@
 // only the wire shapes a real MCP server can return:
 //
 //   - 2xx with `Content-Type: text/event-stream` — streamable HTTP
-//     transport, body is an SSE stream we don't consume.
+//     transport; the stream is read (bounded by the probe timeout) so an
+//     authorization rejection wrapped in the JSON-RPC envelope is not
+//     mistaken for a healthy unauthenticated handshake.
 //   - 2xx with `Content-Type: application/json` whose body parses as a
 //     JSON-RPC 2.0 envelope (`{jsonrpc:"2.0", result|error|method,...}`).
 //   - 401 with `WWW-Authenticate: Bearer` AND a JSON-RPC error envelope
@@ -107,6 +109,34 @@ const isOAuthErrorBody = (body: string): boolean => {
   if (Array.isArray(obj.errors)) return false;
   return typeof obj.error === "string";
 };
+
+/** JSON-RPC error messages a server uses to say "this credential is not
+ *  good enough" rather than "this request was malformed". */
+const JsonRpcErrorEnvelope = Schema.Struct({
+  jsonrpc: Schema.Literal("2.0"),
+  error: Schema.Struct({ message: Schema.String }),
+});
+const decodeJsonRpcErrorEnvelope = Schema.decodeUnknownOption(
+  Schema.fromJsonString(JsonRpcErrorEnvelope),
+);
+
+const AUTH_REJECTION =
+  /\b(401|403|unauthori[sz]|unauthenticated|forbidden|requires? authori[sz]ation|invalid[_ -]token|access denied)/i;
+
+/** Whether a streamable-HTTP SSE body carries a JSON-RPC error that is an
+ *  authorization rejection. A server may answer `initialize` with 200 +
+ *  `text/event-stream` and put its 401 inside the envelope
+ *  (`{"error":{"code":-32603,"message":"... the server requires authorization
+ *  (HTTP 401)"}}`), which is the only place the rejection appears: the status
+ *  line and headers look like a healthy unauthenticated handshake. */
+const isSseAuthRejection = (body: string): boolean =>
+  body
+    .split(/\r?\n/)
+    .filter((line) => /^data:/.test(line))
+    .some((line) => {
+      const envelope = decodeJsonRpcErrorEnvelope(line.slice("data:".length).trim());
+      return Option.isSome(envelope) && AUTH_REJECTION.test(envelope.value.error.message);
+    });
 
 /** RFC 9728 protected-resource-metadata document. We only need the two
  *  fields that prove the document genuinely describes an OAuth-protected
@@ -350,9 +380,15 @@ export const probeMcpEndpointShape = (
               }
               return { kind: "mcp", requiresAuth: false } as const;
             }
-            // POST 2xx: SSE body is opaque to us; otherwise require a
-            // JSON-RPC envelope so we don't accept HTML/REST 200 responses.
-            if (isSse) return { kind: "mcp", requiresAuth: false } as const;
+            // POST 2xx: an SSE body is the streamable-HTTP response to
+            // `initialize`, so read it (bounded by `timeoutMs`) — a server that
+            // wraps its 401 in the JSON-RPC envelope still requires auth.
+            // Otherwise require a JSON-RPC envelope so we don't accept
+            // HTML/REST 200 responses.
+            if (isSse) {
+              const sseBody = yield* readBody(response);
+              return { kind: "mcp", requiresAuth: isSseAuthRejection(sseBody) } as const;
+            }
             const body = yield* readBody(response);
             if (!isJsonRpcEnvelope(body)) {
               return {
