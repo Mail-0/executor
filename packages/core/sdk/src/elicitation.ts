@@ -55,6 +55,9 @@ export interface InvokeOptions {
   readonly onElicitation?: OnElicitation;
   /** Confines the call to tools whose integration slug (first address segment) is listed; anything else fails before policy/approval. */
   readonly integrations?: readonly string[];
+  /** `"read"` fails any call whose resolved annotations lack `readOnly: true`,
+   *  before the handler runs and irrespective of policy. Default `"write"`. */
+  readonly mode?: "read" | "write";
 }
 
 /** A tool was declined or cancelled during elicitation. */

@@ -55,6 +55,7 @@ export {
   ToolInvocationError,
   ToolBlockedError,
   IntegrationScopeError,
+  ReadOnlyModeViolationError,
   PluginNotLoadedError,
   NoHandlerError,
   IntegrationNotFoundError,

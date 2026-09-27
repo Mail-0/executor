@@ -524,6 +524,9 @@ export type ExecutionEngine<E extends Cause.YieldableError = CodeExecutionError>
     options: {
       readonly onElicitation: ElicitationHandler;
       readonly integrations?: readonly string[];
+      /** `"read"` fails any tool call not positively classified read-only,
+       *  before the handler runs and irrespective of policy. */
+      readonly mode?: "read" | "write";
     },
   ) => Effect.Effect<ExecuteResult, E>;
 
@@ -540,7 +543,11 @@ export type ExecutionEngine<E extends Cause.YieldableError = CodeExecutionError>
    */
   readonly executeWithPause: (
     code: string,
-    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
+    options?: {
+      readonly autoApprove?: boolean;
+      readonly integrations?: readonly string[];
+      readonly mode?: "read" | "write";
+    },
   ) => Effect.Effect<ExecutionResult, E>;
 
   /**
@@ -647,11 +654,16 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
    */
   const startPausableExecution = Effect.fn("mcp.execute")(function* (
     code: string,
-    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
+    options?: {
+      readonly autoApprove?: boolean;
+      readonly integrations?: readonly string[];
+      readonly mode?: "read" | "write";
+    },
   ) {
     yield* Effect.annotateCurrentSpan({
       "mcp.execute.mode": "pausable",
       "mcp.execute.code_length": code.length,
+      ...(options?.mode === "read" ? { "mcp.execute.read_only": true } : {}),
     });
 
     // Operator-approved invoke: run through the inline path with an accept-all
@@ -662,6 +674,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
       const result = yield* runInlineExecution(code, {
         onElicitation: acceptAllHandler,
         integrations: options.integrations,
+        mode: options.mode,
       });
       return { status: "completed", result } satisfies ExecutionResult;
     }
@@ -699,7 +712,11 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
 
     const invoker = makeFullInvoker(
       executor,
-      { onElicitation: elicitationHandler, integrations: options?.integrations },
+      {
+        onElicitation: elicitationHandler,
+        integrations: options?.integrations,
+        mode: options?.mode,
+      },
       toolDiscoveryProvider,
     );
     fiber = yield* Effect.forkDetach(executeRecorded(codeExecutor, code, invoker));
@@ -792,17 +809,20 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
     options: {
       readonly onElicitation: ElicitationHandler;
       readonly integrations?: readonly string[];
+      readonly mode?: "read" | "write";
     },
   ) {
     yield* Effect.annotateCurrentSpan({
       "mcp.execute.mode": "inline",
       "mcp.execute.code_length": code.length,
+      ...(options.mode === "read" ? { "mcp.execute.read_only": true } : {}),
     });
     const invoker = makeFullInvoker(
       executor,
       {
         onElicitation: options.onElicitation,
         integrations: options.integrations,
+        mode: options.mode,
       },
       toolDiscoveryProvider,
     );
