@@ -30,6 +30,7 @@ import {
   AuthTemplateSlug,
   ConnectionName,
   IntegrationSlug,
+  isToolResult,
   ToolAddress,
 } from "@executor-js/sdk";
 import { makeTestConfig, memoryCredentialsPlugin } from "@executor-js/sdk/testing";
@@ -49,6 +50,7 @@ const testPlugins = () =>
 // `/things` GET op `listThings` under group "things" → tool path
 // `things.listThings`, used verbatim (dots and all) as the address tool segment.
 const LIST_THINGS = "things.listThings";
+const CREATE_THING = "things.createThing";
 
 type ResponseScript = (req: {
   url: string;
@@ -63,8 +65,8 @@ type ResponseScript = (req: {
 const startScriptedServer = (script: ResponseScript) =>
   serveOpenApiHttpApiTestServer({
     api: FailureApi,
-    handlersLayer: HttpApiBuilder.group(FailureApi, "things", (handlers) =>
-      handlers.handle("listThings", () =>
+    handlersLayer: HttpApiBuilder.group(FailureApi, "things", (handlers) => {
+      const handleRequest = () =>
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const result = script({
@@ -76,9 +78,9 @@ const startScriptedServer = (script: ResponseScript) =>
             status: result.status ?? 200,
             headers: result.headers ?? { "content-type": "application/json" },
           });
-        }),
-      ),
-    ),
+        });
+      return handlers.handle("listThings", handleRequest).handle("createThing", handleRequest);
+    }),
   });
 
 const startDroppingServer = () =>
@@ -106,6 +108,9 @@ const ThingsGroup = HttpApiGroup.make("things").add(
   HttpApiEndpoint.get("listThings", "/things", {
     success: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
   }),
+  HttpApiEndpoint.post("createThing", "/things", {
+    success: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  }),
 );
 
 const FailureApi = HttpApi.make("failuresTest")
@@ -131,11 +136,11 @@ const buildExecutor = (baseUrl: string) =>
     return { executor, address };
   });
 
-const buildExecutorForOpenApiServer = (server: OpenApiTestServerShape) =>
+const buildExecutorForOpenApiServer = (server: OpenApiTestServerShape, toolName = LIST_THINGS) =>
   Effect.gen(function* () {
     const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
     const conn = yield* addOpenApiTestConnection(executor, server, { slug: "f" });
-    return { executor, address: conn.address(LIST_THINGS) };
+    return { executor, address: conn.address(toolName) };
   });
 
 describe("OpenAPI upstream failure modes", () => {
@@ -168,6 +173,45 @@ describe("OpenAPI upstream failure modes", () => {
       // branch — asserted unconditionally so a regression in either
       // shape surfaces here.
       expect(text.startsWith('{"data":')).toBe(false);
+    }),
+  );
+
+  it.effect("marks only safe upstream HTTP failures retryable", () =>
+    Effect.gen(function* () {
+      const cases = [
+        { method: "POST", status: 429, toolName: CREATE_THING, retryable: true },
+        { method: "POST", status: 500, toolName: CREATE_THING, retryable: false },
+        { method: "GET", status: 500, toolName: LIST_THINGS, retryable: true },
+        { method: "GET", status: 404, toolName: LIST_THINGS, retryable: false },
+      ] as const;
+
+      for (const testCase of cases) {
+        const observedMethods: string[] = [];
+        const server = yield* startScriptedServer(({ method }) => {
+          observedMethods.push(method);
+          return { status: testCase.status };
+        });
+        const { executor, address } = yield* buildExecutorForOpenApiServer(
+          server,
+          testCase.toolName,
+        );
+
+        const result = yield* executor.execute(address, {});
+
+        expect(observedMethods).toEqual([testCase.method]);
+        expect(result).toMatchObject({
+          ok: false,
+          error: {
+            code: "upstream_http_error",
+            status: testCase.status,
+            ...(testCase.retryable ? { retryable: true } : {}),
+          },
+        });
+        const error = isToolResult(result) && !result.ok ? result.error : undefined;
+        expect(error).toBeDefined();
+        expect(Object.hasOwn(error ?? {}, "retryable")).toBe(testCase.retryable);
+        expect(error?.retryable).toBe(testCase.retryable ? true : undefined);
+      }
     }),
   );
 
@@ -207,6 +251,7 @@ describe("OpenAPI upstream failure modes", () => {
         error: {
           code: "connection_rejected",
           status: 401,
+          retryable: false,
           message: expect.stringContaining("Upstream rejected credentials"),
           details: {
             category: "authentication",

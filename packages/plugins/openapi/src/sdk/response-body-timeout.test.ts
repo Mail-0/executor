@@ -140,6 +140,7 @@ describe("OpenAPI response body timeout", () => {
           ok: false,
           error: {
             code: "upstream_response_body_timeout",
+            retryable: true,
             message: expect.stringContaining("response body"),
           },
         });

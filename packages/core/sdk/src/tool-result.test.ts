@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { ToolResult, isToolFile, isToolResult } from "./tool-result";
+import { ToolResult, isRetryableUpstreamFailure, isToolFile, isToolResult } from "./tool-result";
 
 describe("ToolResult", () => {
   it("ok wraps a value", () => {
@@ -46,6 +46,73 @@ describe("ToolResult", () => {
         error: { code: "x", message: "y" },
       }),
     ).toBe(true);
+  });
+});
+
+describe("isRetryableUpstreamFailure", () => {
+  it.each([
+    {
+      name: "408 is retryable for a non-idempotent operation",
+      input: { status: 408, idempotent: false },
+      expected: true,
+    },
+    {
+      name: "425 is retryable for a non-idempotent operation",
+      input: { status: 425, idempotent: false },
+      expected: true,
+    },
+    {
+      name: "429 is retryable for a non-idempotent operation",
+      input: { status: 429, idempotent: false },
+      expected: true,
+    },
+    {
+      name: "503 is retryable for a non-idempotent operation",
+      input: { status: 503, idempotent: false },
+      expected: true,
+    },
+    {
+      name: "500 is retryable for an idempotent operation",
+      input: { status: 500, idempotent: true },
+      expected: true,
+    },
+    {
+      name: "502 is retryable for an idempotent operation",
+      input: { status: 502, idempotent: true },
+      expected: true,
+    },
+    {
+      name: "504 is retryable for an idempotent operation",
+      input: { status: 504, idempotent: true },
+      expected: true,
+    },
+    {
+      name: "500 is not retryable for a non-idempotent operation",
+      input: { status: 500, idempotent: false },
+      expected: false,
+    },
+    {
+      name: "404 is not retryable for an idempotent operation",
+      input: { status: 404, idempotent: true },
+      expected: false,
+    },
+    {
+      name: "401 is not retryable for an idempotent operation",
+      input: { status: 401, idempotent: true },
+      expected: false,
+    },
+    {
+      name: "a timeout is retryable for an idempotent operation",
+      input: { timedOut: true, idempotent: true },
+      expected: true,
+    },
+    {
+      name: "a timeout is not retryable for a non-idempotent operation",
+      input: { timedOut: true, idempotent: false },
+      expected: false,
+    },
+  ])("$name", ({ input, expected }) => {
+    expect(isRetryableUpstreamFailure(input)).toBe(expected);
   });
 });
 

@@ -9,6 +9,7 @@ import {
   authToolFailure,
   classifyHttpStatus,
   detectInsufficientScope,
+  isRetryableUpstreamFailure,
   sortHealthCheckCandidatesByIdentity,
   extractIdentity,
   extractResponseFields,
@@ -696,6 +697,7 @@ export const invokeOpenApiBackedTool = (input: {
       Object.assign(queryParams, rendered.queryParams);
     }
 
+    const idempotent = ["get", "head", "options", "put", "delete"].includes(binding.method);
     const invocation = yield* invokeWithLayer(
       binding,
       (input.args ?? {}) as Record<string, unknown>,
@@ -714,6 +716,9 @@ export const invokeOpenApiBackedTool = (input: {
                 code: "upstream_response_headers_timeout",
                 message: error.message,
                 details: error.cause ?? error,
+                ...(isRetryableUpstreamFailure({ timedOut: true, idempotent })
+                  ? { retryable: true }
+                  : {}),
               }),
             })
           : error.reason === "response_body_timeout"
@@ -723,6 +728,9 @@ export const invokeOpenApiBackedTool = (input: {
                   code: "upstream_response_body_timeout",
                   message: error.message,
                   details: error.cause ?? error,
+                  ...(isRetryableUpstreamFailure({ timedOut: true, idempotent })
+                    ? { retryable: true }
+                    : {}),
                 }),
               })
             : Effect.fail(error),
@@ -787,6 +795,9 @@ export const invokeOpenApiBackedTool = (input: {
         status: result.status,
         message: extractOpenApiUpstreamMessage(result.error, result.status),
         details: result.error,
+        ...(isRetryableUpstreamFailure({ status: result.status, idempotent })
+          ? { retryable: true }
+          : {}),
       });
     }
     return ToolResult.ok(result.data, {
