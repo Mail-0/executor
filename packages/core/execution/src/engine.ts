@@ -23,7 +23,9 @@ import {
   makeExecutorToolInvoker,
   listExecutorIntegrations,
   describeTool,
+  type PagedResult,
   type ToolDiscoveryProvider,
+  type ToolDiscoveryResult,
 } from "./tool-invoker";
 import { ExecutionToolError } from "./errors";
 import { buildExecuteDescription } from "./description";
@@ -382,6 +384,20 @@ const makeFullInvoker = (
           return Effect.fail(offset);
         }
 
+        const namespace = typeof args.namespace === "string" ? args.namespace.trim() : undefined;
+        if (
+          invokeOptions.integrations &&
+          namespace &&
+          !invokeOptions.integrations.includes(namespace)
+        ) {
+          return Effect.succeed({
+            items: [],
+            total: 0,
+            hasMore: false,
+            nextOffset: null,
+          } satisfies PagedResult<ToolDiscoveryResult>);
+        }
+
         return toolDiscoveryProvider
           .searchTools({
             executor,
@@ -389,7 +405,18 @@ const makeFullInvoker = (
             limit,
             namespace: args.namespace,
             offset,
+            integrations: invokeOptions.integrations,
           })
+          .pipe(
+            Effect.map((page) => ({
+              ...page,
+              items: page.items.filter(
+                (item) =>
+                  !invokeOptions.integrations ||
+                  invokeOptions.integrations.includes(item.integration),
+              ),
+            })),
+          )
           .pipe(
             Effect.withSpan("mcp.tool.dispatch", {
               attributes: { "mcp.tool.name": path, "executor.tool.builtin": true },
@@ -434,6 +461,7 @@ const makeFullInvoker = (
           query: isRecord(args) && typeof args.query === "string" ? args.query : undefined,
           limit,
           offset,
+          integrations: invokeOptions.integrations,
         }).pipe(
           Effect.withSpan("mcp.tool.dispatch", {
             attributes: { "mcp.tool.name": path, "executor.tool.builtin": true },
@@ -461,7 +489,9 @@ const makeFullInvoker = (
           );
         }
 
-        return describeTool(executor, args.path).pipe(
+        return describeTool(executor, args.path, {
+          integrations: invokeOptions.integrations,
+        }).pipe(
           Effect.withSpan("mcp.tool.dispatch", {
             attributes: {
               "mcp.tool.name": path,
@@ -491,7 +521,10 @@ export type ExecutionEngine<E extends Cause.YieldableError = CodeExecutionError>
    */
   readonly execute: (
     code: string,
-    options: { readonly onElicitation: ElicitationHandler },
+    options: {
+      readonly onElicitation: ElicitationHandler;
+      readonly integrations?: readonly string[];
+    },
   ) => Effect.Effect<ExecuteResult, E>;
 
   /**
@@ -507,7 +540,7 @@ export type ExecutionEngine<E extends Cause.YieldableError = CodeExecutionError>
    */
   readonly executeWithPause: (
     code: string,
-    options?: { readonly autoApprove?: boolean },
+    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
   ) => Effect.Effect<ExecutionResult, E>;
 
   /**
@@ -614,7 +647,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
    */
   const startPausableExecution = Effect.fn("mcp.execute")(function* (
     code: string,
-    options?: { readonly autoApprove?: boolean },
+    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
   ) {
     yield* Effect.annotateCurrentSpan({
       "mcp.execute.mode": "pausable",
@@ -626,7 +659,10 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
     // pauses, so the caller always gets a completed result.
     if (options?.autoApprove) {
       yield* Effect.annotateCurrentSpan({ "mcp.execute.auto_approve": true });
-      const result = yield* runInlineExecution(code, { onElicitation: acceptAllHandler });
+      const result = yield* runInlineExecution(code, {
+        onElicitation: acceptAllHandler,
+        integrations: options.integrations,
+      });
       return { status: "completed", result } satisfies ExecutionResult;
     }
 
@@ -663,7 +699,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
 
     const invoker = makeFullInvoker(
       executor,
-      { onElicitation: elicitationHandler },
+      { onElicitation: elicitationHandler, integrations: options?.integrations },
       toolDiscoveryProvider,
     );
     fiber = yield* Effect.forkDetach(executeRecorded(codeExecutor, code, invoker));
@@ -753,7 +789,10 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
    */
   const runInlineExecution = Effect.fn("mcp.execute")(function* (
     code: string,
-    options: { readonly onElicitation: ElicitationHandler },
+    options: {
+      readonly onElicitation: ElicitationHandler;
+      readonly integrations?: readonly string[];
+    },
   ) {
     yield* Effect.annotateCurrentSpan({
       "mcp.execute.mode": "inline",
@@ -763,6 +802,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
       executor,
       {
         onElicitation: options.onElicitation,
+        integrations: options.integrations,
       },
       toolDiscoveryProvider,
     );

@@ -54,6 +54,7 @@ export {
   ToolNotFoundError,
   ToolInvocationError,
   ToolBlockedError,
+  IntegrationScopeError,
   PluginNotLoadedError,
   NoHandlerError,
   IntegrationNotFoundError,

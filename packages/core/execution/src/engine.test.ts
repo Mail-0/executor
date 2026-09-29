@@ -1,9 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Data, Effect, Exit } from "effect";
+import { Data, Effect, Exit, Schema } from "effect";
 
 import { createExecutor, definePlugin } from "@executor-js/sdk";
 import { makeTestConfig } from "@executor-js/sdk/testing";
 import type { CodeExecutor, ExecuteResult } from "@executor-js/codemode-core";
+import { makeQuickJsExecutor } from "@executor-js/runtime-quickjs";
 
 import { createExecutionEngine } from "./engine";
 
@@ -34,7 +35,49 @@ const emptyPlugin = definePlugin(() => ({
   staticIntegrations: () => [],
 }));
 
+const scopedPlugin = definePlugin(() => ({
+  id: "scoped-fixture" as const,
+  storage: () => ({}),
+  staticIntegrations: () => [
+    {
+      id: "alpha",
+      kind: "in-memory",
+      name: "Alpha",
+      tools: [
+        {
+          name: "get",
+          description: "Read alpha data",
+          inputSchema: Schema.toStandardSchemaV1(Schema.toStandardJSONSchemaV1(Schema.Struct({}))),
+          handler: () => Effect.succeed({ source: "alpha" }),
+        },
+        {
+          name: "approve",
+          description: "Approval-gated alpha action",
+          inputSchema: Schema.toStandardSchemaV1(Schema.toStandardJSONSchemaV1(Schema.Struct({}))),
+          annotations: { requiresApproval: true },
+          handler: () => Effect.succeed({ source: "approved-alpha" }),
+        },
+      ],
+    },
+    {
+      id: "beta",
+      kind: "in-memory",
+      name: "Beta",
+      tools: [
+        {
+          name: "get",
+          description: "Read beta data",
+          inputSchema: Schema.toStandardSchemaV1(Schema.toStandardJSONSchemaV1(Schema.Struct({}))),
+          handler: () => Effect.succeed({ source: "beta" }),
+        },
+      ],
+    },
+  ],
+}));
+
 const makeExecutor = () => createExecutor(makeTestConfig({ plugins: [emptyPlugin()] as const }));
+const makeScopedExecutor = () =>
+  createExecutor(makeTestConfig({ plugins: [scopedPlugin()] as const }));
 
 describe("executeWithPause failure propagation", () => {
   it.effect("surfaces a fast codeExecutor failure as an Exit.Failure", () =>
@@ -134,6 +177,216 @@ describe("tool call log", () => {
       expect(calls[1]).toMatchObject({ ok: true, input: { query: "nothing" } });
       expect(typeof calls[0]?.durationMs).toBe("number");
       expect(Number.isNaN(Date.parse(calls[0]?.startedAt ?? ""))).toBe(false);
+    }),
+  );
+});
+
+describe("per-execution integration scope", () => {
+  const quickJsExecutor = makeQuickJsExecutor();
+
+  const scopedRuntime: CodeExecutor<FakeRuntimeError> = {
+    execute: (_code, tools) =>
+      Effect.gen(function* () {
+        const invoke = (path: string, args: unknown) =>
+          tools.invoke({ path, args }).pipe(Effect.orElseSucceed(() => null));
+        const alpha = yield* invoke("alpha.get", {});
+        const beta = yield* invoke("beta.get", {});
+        const staticTool = yield* invoke("executor.secret", {});
+        const search = yield* invoke("search", { query: "", namespace: "alpha" });
+        const querySearch = yield* invoke("search", { query: "Read" });
+        const betaSearch = yield* invoke("search", { query: "", namespace: "beta" });
+        const described = yield* invoke("describe.tool", { path: "beta.get" });
+        const describedSearch = yield* invoke("describe.tool", { path: "search" });
+        const describedIntegrations = yield* invoke("describe.tool", {
+          path: "executor.integrations.list",
+        });
+        const integrations = yield* invoke("executor.integrations.list", {});
+        return {
+          result: {
+            alpha,
+            beta,
+            staticTool,
+            search,
+            querySearch,
+            betaSearch,
+            described,
+            describedSearch,
+            describedIntegrations,
+            integrations,
+          },
+          logs: [],
+        } satisfies ExecuteResult;
+      }),
+  };
+
+  it.effect("limits calls and discovery to the requested integrations", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeScopedExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: scopedRuntime });
+      const result = yield* engine.execute("scoped", {
+        onElicitation: () => Effect.succeed({ action: "accept" }),
+        integrations: ["alpha"],
+      });
+
+      expect(result.result).toMatchObject({
+        alpha: { ok: true, data: { source: "alpha" } },
+        beta: { ok: false, error: { code: "out_of_scope" } },
+        staticTool: { ok: false, error: { code: "out_of_scope" } },
+        search: {
+          items: [
+            expect.objectContaining({ integration: "alpha" }),
+            expect.objectContaining({ integration: "alpha" }),
+          ],
+          total: 2,
+          hasMore: false,
+        },
+        querySearch: {
+          items: [expect.objectContaining({ integration: "alpha" })],
+          total: 1,
+          hasMore: false,
+        },
+        betaSearch: { items: [], total: 0, hasMore: false },
+        described: { error: { code: "tool_not_found" } },
+        describedSearch: {
+          path: "search",
+          name: "search",
+          description:
+            "Search available Executor tools. An empty query with a namespace enumerates that integration's full catalog, sorted by path.",
+        },
+        describedIntegrations: {
+          path: "executor.integrations.list",
+          name: "executor.integrations.list",
+          description: "List configured Executor integrations.",
+        },
+        integrations: { items: [expect.objectContaining({ id: "alpha" })], total: 1 },
+      });
+      const calls = result.toolCalls ?? [];
+      expect(calls.find((call) => call.path === "beta.get")).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("outside this execution's integration scope"),
+      });
+      expect(calls.find((call) => call.path === "search")).toBeDefined();
+    }),
+  );
+
+  it.effect("keeps the scope attached to a paused execution through resume", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeScopedExecutor();
+      const codeExecutor: CodeExecutor<FakeRuntimeError> = {
+        execute: (_code, tools) =>
+          Effect.gen(function* () {
+            const approved = yield* tools
+              .invoke({ path: "alpha.approve", args: {} })
+              .pipe(Effect.orElseSucceed(() => null));
+            const beta = yield* tools
+              .invoke({ path: "beta.get", args: {} })
+              .pipe(Effect.orElseSucceed(() => null));
+            return { result: { approved, beta }, logs: [] } satisfies ExecuteResult;
+          }),
+      };
+      const engine = createExecutionEngine({ executor, codeExecutor });
+      const paused = yield* engine.executeWithPause("pause", { integrations: ["alpha"] });
+      expect(paused.status).toBe("paused");
+      if (paused.status !== "paused") return;
+
+      const resumed = yield* engine.resume(paused.execution.id, { action: "accept" });
+      expect(resumed?.status).toBe("completed");
+      if (resumed?.status !== "completed") return;
+      expect(resumed.result.result).toMatchObject({
+        approved: { ok: true, data: { source: "approved-alpha" } },
+        beta: { ok: false, error: { code: "out_of_scope" } },
+      });
+    }),
+  );
+
+  it.effect("keeps the scope in the auto-approve inline path", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeScopedExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: scopedRuntime });
+      const outcome = yield* engine.executeWithPause("auto-approved", {
+        autoApprove: true,
+        integrations: ["alpha"],
+      });
+
+      expect(outcome.status).toBe("completed");
+      if (outcome.status !== "completed") return;
+      expect(outcome.result.result).toMatchObject({
+        alpha: { ok: true, data: { source: "alpha" } },
+        beta: { ok: false, error: { code: "out_of_scope" } },
+      });
+    }),
+  );
+
+  it.effect("leaves beta callable when no scope is supplied", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeScopedExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: scopedRuntime });
+      const result = yield* engine.execute("unscoped", {
+        onElicitation: () => Effect.succeed({ action: "accept" }),
+      });
+      expect(result.result).toMatchObject({
+        beta: { ok: true, data: { source: "beta" } },
+      });
+    }),
+  );
+
+  it.effect("does not expose beta through hostile snippets or wrapper-closing source", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeScopedExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: quickJsExecutor });
+      const snippets = [
+        {
+          code: 'return typeof globalThis.tools === "undefined" ? null : await globalThis.tools.beta.org.main.get({});',
+        },
+        {
+          code: "try { const { beta } = tools; return await beta.org.main.get({}); } catch { return null; }",
+        },
+        {
+          code: 'const key = ["beta", "org", "main", "get"].join("."); return await tools[key]({});',
+        },
+        {
+          code: "async () => 0); } catch (e) {} })(null) || await tools.beta.org.main.get({}) || (async (tools) => { try { const __fn = (async () => 0",
+        },
+      ];
+
+      const executions: ExecuteResult[] = [];
+      for (const snippet of snippets) {
+        const execution = yield* engine.execute(snippet.code, {
+          onElicitation: () => Effect.succeed({ action: "accept" }),
+          integrations: ["alpha"],
+        });
+        executions.push(execution);
+        expect(JSON.stringify(execution.result)).not.toContain('"source":"beta"');
+        expect(
+          (execution.toolCalls ?? [])
+            .filter((call) => call.path.includes("beta"))
+            .every((call) => !call.ok),
+        ).toBe(true);
+      }
+      expect(executions[2]?.toolCalls?.find((call) => call.path.includes("beta"))).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("outside this execution's integration scope"),
+      });
+    }),
+  );
+
+  it.effect("preserves a block policy for an in-scope tool", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeScopedExecutor();
+      yield* executor.policies.create({
+        owner: "org",
+        pattern: "alpha.get",
+        action: "block",
+      });
+      const engine = createExecutionEngine({ executor, codeExecutor: scopedRuntime });
+      const result = yield* engine.execute("blocked-in-scope", {
+        onElicitation: () => Effect.succeed({ action: "accept" }),
+        integrations: ["alpha"],
+      });
+      expect(result.result).toMatchObject({
+        alpha: { ok: false, error: { code: "tool_blocked" } },
+        beta: { ok: false, error: { code: "out_of_scope" } },
+      });
     }),
   );
 });

@@ -53,6 +53,8 @@ export type OnElicitation = ElicitationHandler | "accept-all";
 export interface InvokeOptions {
   /** Override the executor-level handler for this single call. */
   readonly onElicitation?: OnElicitation;
+  /** Confines the call to tools whose integration slug (first address segment) is listed; anything else fails before policy/approval. */
+  readonly integrations?: readonly string[];
 }
 
 /** A tool was declined or cancelled during elicitation. */

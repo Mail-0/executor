@@ -1165,6 +1165,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
     const executeCode = (
       code: string,
       extra: McpRequestJoinKeys,
+      integrations?: readonly string[],
     ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
         yield* startMarker("mcp.host.tool.execute.start", {
@@ -1180,10 +1181,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         if (elicitationMode.mode === "native") {
           const result = yield* engine.execute(code, {
             onElicitation: makeMcpElicitationHandler(server, debugLog),
+            integrations,
           });
           return toMcpResult(result);
         }
-        const outcome = yield* engine.executeWithPause(code);
+        const outcome = yield* engine.executeWithPause(code, { integrations });
         debugLog("execute.paused_flow_result", {
           status: outcome.status,
           executionId: outcome.status === "paused" ? outcome.execution.id : undefined,
@@ -1464,9 +1466,18 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         "execute",
         {
           description,
-          inputSchema: { code: z.string().trim().min(1) },
+          inputSchema: {
+            code: z.string().trim().min(1),
+            integrations: z
+              .array(z.string().trim().min(1))
+              .min(1)
+              .optional()
+              .describe(
+                "Confine this run to tools of these integration slugs: any other tool call fails with out_of_scope, and search / describe.tool / executor.integrations.list only see these integrations.",
+              ),
+          },
         },
-        ({ code }, extra) => runToolEffect(executeCode(code, extra)),
+        ({ code, integrations }, extra) => runToolEffect(executeCode(code, extra, integrations)),
       ),
     ).pipe(
       Effect.withSpan("mcp.host.register_tool", {

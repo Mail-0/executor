@@ -80,6 +80,19 @@ export class ToolBlockedError extends Schema.TaggedErrorClass<ToolBlockedError>(
   }
 }
 
+/** Tool invocation was rejected because its integration is outside the
+ *  execution's integration scope. */
+export class IntegrationScopeError extends Schema.TaggedErrorClass<IntegrationScopeError>()(
+  "IntegrationScopeError",
+  {
+    address: ToolAddress,
+  },
+) {
+  override get message(): string {
+    return `Tool is outside this execution's integration scope: ${this.address}`;
+  }
+}
+
 /** Tool row exists but its owning plugin isn't loaded in this executor config. */
 export class PluginNotLoadedError extends Schema.TaggedErrorClass<PluginNotLoadedError>()(
   "PluginNotLoadedError",
@@ -221,6 +234,7 @@ export type ExecuteError =
   | ToolNotFoundError
   | ToolInvocationError
   | ToolBlockedError
+  | IntegrationScopeError
   | PluginNotLoadedError
   | NoHandlerError
   | ConnectionNotFoundError
