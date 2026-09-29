@@ -806,14 +806,40 @@ export const buildToolTypeScriptPreview = async (input: {
     return {};
   }
 
-  const wrappedSchema = buildWrappedObjectSchema(properties, input.defs);
-  return Promise.resolve()
-    .then(() => compile(wrappedSchema, ROOT_WRAPPER_NAME, compilerOptionsFrom(input.options ?? {})))
-    .then(
-      (source) => previewToolFromCompiledTypeScript(source),
-      () => ({
-        ...(input.inputSchema !== undefined ? { inputTypeScript: "unknown" } : {}),
-        ...(input.outputSchema !== undefined ? { outputTypeScript: "unknown" } : {}),
-      }),
-    );
+  const compileProperties = (
+    subset: ReadonlyArray<readonly [string, unknown]>,
+  ): Promise<ToolTypeScriptPreview | null> =>
+    Promise.resolve()
+      .then(() =>
+        compile(
+          buildWrappedObjectSchema(subset, input.defs),
+          ROOT_WRAPPER_NAME,
+          compilerOptionsFrom(input.options ?? {}),
+        ),
+      )
+      .then(previewToolFromCompiledTypeScript, () => null);
+
+  // A schema the compiler rejects renders as `unknown` on its own, so a broken
+  // output schema never hides a well-formed input schema (or vice versa).
+  const combined = await compileProperties(properties);
+  if (combined) return combined;
+  const [inputPreview, outputPreview] = await Promise.all(
+    [TOOL_INPUT_PROPERTY_NAME, TOOL_OUTPUT_PROPERTY_NAME].map((name) => {
+      const subset = properties.filter(([property]) => property === name);
+      return subset.length === 0 ? Promise.resolve(null) : compileProperties(subset);
+    }),
+  );
+  const typeScriptDefinitions = {
+    ...inputPreview?.typeScriptDefinitions,
+    ...outputPreview?.typeScriptDefinitions,
+  };
+  return {
+    ...(input.inputSchema !== undefined
+      ? { inputTypeScript: inputPreview?.inputTypeScript ?? "unknown" }
+      : {}),
+    ...(input.outputSchema !== undefined
+      ? { outputTypeScript: outputPreview?.outputTypeScript ?? "unknown" }
+      : {}),
+    ...(Object.keys(typeScriptDefinitions).length > 0 ? { typeScriptDefinitions } : {}),
+  };
 };
