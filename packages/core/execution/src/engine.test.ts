@@ -196,6 +196,10 @@ describe("per-execution integration scope", () => {
         const querySearch = yield* invoke("search", { query: "Read" });
         const betaSearch = yield* invoke("search", { query: "", namespace: "beta" });
         const described = yield* invoke("describe.tool", { path: "beta.get" });
+        const describedSearch = yield* invoke("describe.tool", { path: "search" });
+        const describedIntegrations = yield* invoke("describe.tool", {
+          path: "executor.integrations.list",
+        });
         const integrations = yield* invoke("executor.integrations.list", {});
         return {
           result: {
@@ -206,6 +210,8 @@ describe("per-execution integration scope", () => {
             querySearch,
             betaSearch,
             described,
+            describedSearch,
+            describedIntegrations,
             integrations,
           },
           logs: [],
@@ -241,6 +247,17 @@ describe("per-execution integration scope", () => {
         },
         betaSearch: { items: [], total: 0, hasMore: false },
         described: { error: { code: "tool_not_found" } },
+        describedSearch: {
+          path: "search",
+          name: "search",
+          description:
+            "Search available Executor tools. An empty query with a namespace enumerates that integration's full catalog, sorted by path.",
+        },
+        describedIntegrations: {
+          path: "executor.integrations.list",
+          name: "executor.integrations.list",
+          description: "List configured Executor integrations.",
+        },
         integrations: { items: [expect.objectContaining({ id: "alpha" })], total: 1 },
       });
       const calls = result.toolCalls ?? [];

@@ -853,6 +853,9 @@ export const describeTool = Effect.fn("executor.tools.describe")(function* (
 ) {
   yield* Effect.annotateCurrentSpan({ "mcp.tool.name": path });
 
+  const builtin = BUILTIN_TOOL_DESCRIPTIONS.get(path);
+  if (builtin) return builtin;
+
   if (options?.integrations && !options.integrations.includes(extractNamespace(path))) {
     return {
       path,
@@ -863,9 +866,6 @@ export const describeTool = Effect.fn("executor.tools.describe")(function* (
       },
     } satisfies DescribedTool;
   }
-
-  const builtin = BUILTIN_TOOL_DESCRIPTIONS.get(path);
-  if (builtin) return builtin;
 
   const address = pathToAddress(path);
 
