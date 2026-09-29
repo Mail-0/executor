@@ -231,6 +231,63 @@ describe("MCP host server — native elicitation mode", () => {
     });
   });
 
+  it("forwards an optional integrations scope and leaves omitted scopes unscoped", async () => {
+    const scopes: (readonly string[] | undefined)[] = [];
+    const engine = makeStubEngine({
+      execute: (_code, options) => {
+        scopes.push(options.integrations);
+        return Effect.succeed({ result: "ok" });
+      },
+    });
+
+    await withNativeClient(engine, ELICITATION_CAPS, async (client) => {
+      const listed = await client.listTools();
+      expect(listed.tools.find((tool) => tool.name === "execute")?.inputSchema).toMatchObject({
+        properties: {
+          integrations: {
+            description:
+              "Confine this run to tools of these integration slugs: any other tool call fails with out_of_scope, and search / describe.tool / executor.integrations.list only see these integrations.",
+          },
+        },
+      });
+
+      await client.callTool({
+        name: "execute",
+        arguments: { code: "run scoped", integrations: ["alpha"] },
+      });
+      await client.callTool({
+        name: "execute",
+        arguments: { code: "run unscoped" },
+      });
+    });
+
+    expect(scopes).toEqual([["alpha"], undefined]);
+  });
+
+  it("forwards the integrations scope through the paused execution path", async () => {
+    let scope: readonly string[] | undefined;
+    const engine = makeStubEngine({
+      executeWithPause: (_code, options) => {
+        scope = options?.integrations;
+        return Effect.succeed({ status: "completed", result: { result: "ok" } });
+      },
+    });
+
+    await withClient(
+      engine,
+      {},
+      async (client) => {
+        await client.callTool({
+          name: "execute",
+          arguments: { code: "run scoped", integrations: ["alpha"] },
+        });
+      },
+      { elicitationMode: { mode: "model" } },
+    );
+
+    expect(scope).toEqual(["alpha"]);
+  });
+
   it("execute tool renders emitted file image output as MCP images", async () => {
     const engine = makeStubEngine({
       execute: () =>

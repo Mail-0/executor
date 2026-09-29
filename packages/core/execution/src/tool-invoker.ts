@@ -245,6 +245,14 @@ const expectedToolFailure = (value: unknown): ToolError | null => {
       details: value,
     };
   }
+  if (Predicate.isTagged(value, "IntegrationScopeError") && "address" in value) {
+    const path = addressToPath(String(value.address));
+    return {
+      code: "out_of_scope",
+      message: `Tool is outside this execution's integration scope: ${path}`,
+      details: { path },
+    };
+  }
   if (Predicate.isTagged(value, "ToolInvocationError")) {
     const cause = (value as { readonly cause?: unknown }).cause;
     if (isUserActionableError(cause)) {
@@ -413,6 +421,7 @@ export type ToolDiscoveryInput = {
   readonly namespace?: string;
   readonly limit: number;
   readonly offset: number;
+  readonly integrations?: readonly string[];
 };
 
 export interface ToolDiscoveryProvider {
@@ -654,7 +663,11 @@ export const searchTools = Effect.fn("executor.tools.search")(function* (
   executor: Executor,
   query: string,
   limit = 12,
-  options?: { readonly namespace?: string; readonly offset?: number },
+  options?: {
+    readonly namespace?: string;
+    readonly offset?: number;
+    readonly integrations?: readonly string[];
+  },
 ) {
   const offset = options?.offset ?? 0;
   yield* Effect.annotateCurrentSpan({
@@ -667,6 +680,15 @@ export const searchTools = Effect.fn("executor.tools.search")(function* (
   const emptyQuery = normalizeSearchText(query).length === 0;
   const hasNamespace =
     options?.namespace !== undefined && normalizeSearchText(options.namespace).length > 0;
+  const namespace = options?.namespace?.trim();
+  if (options?.integrations && namespace && !options.integrations.includes(namespace)) {
+    return {
+      items: [],
+      total: 0,
+      hasMore: false,
+      nextOffset: null,
+    } satisfies PagedResult<ToolDiscoveryResult>;
+  }
 
   // An empty query with no namespace stays empty: it carries neither a
   // ranking signal nor a scope, and listing the whole workspace "by default"
@@ -689,7 +711,11 @@ export const searchTools = Effect.fn("executor.tools.search")(function* (
         }),
     ),
   );
-  const searchable = all.map(toSearchableTool);
+  const searchable = all
+    .filter(
+      (tool) => !options?.integrations || options.integrations.includes(String(tool.integration)),
+    )
+    .map(toSearchableTool);
 
   // An empty query WITH a namespace is enumeration, not search: there is no
   // ranking signal, so the namespace's whole catalog comes back sorted by
@@ -728,8 +754,8 @@ export const searchTools = Effect.fn("executor.tools.search")(function* (
 });
 
 export const defaultToolDiscoveryProvider: ToolDiscoveryProvider = {
-  searchTools: ({ executor, query, namespace, limit, offset }) =>
-    searchTools(executor, query, limit, { namespace, offset }),
+  searchTools: ({ executor, query, namespace, limit, offset, integrations }) =>
+    searchTools(executor, query, limit, { namespace, offset, integrations }),
 };
 
 /** What `tools.executor.integrations.list()` calls inside the sandbox. v2: the
@@ -741,6 +767,7 @@ export const listExecutorIntegrations = Effect.fn("executor.integrations.list")(
     readonly query?: string;
     readonly limit?: number;
     readonly offset?: number;
+    readonly integrations?: readonly string[];
   },
 ) {
   const normalizedQuery = normalizeSearchText(options?.query ?? "");
@@ -756,10 +783,13 @@ export const listExecutorIntegrations = Effect.fn("executor.integrations.list")(
     ),
   );
 
+  const scopedIntegrations = options?.integrations
+    ? integrations.filter((integration) => options.integrations?.includes(String(integration.slug)))
+    : integrations;
   const filtered =
     normalizedQuery.length === 0
-      ? integrations
-      : integrations.filter((integration: Integration) => {
+      ? scopedIntegrations
+      : scopedIntegrations.filter((integration: Integration) => {
           const haystack = normalizeSearchText(
             [String(integration.slug), integration.description, integration.kind].join(" "),
           );
@@ -819,8 +849,20 @@ export const listExecutorIntegrations = Effect.fn("executor.integrations.list")(
 export const describeTool = Effect.fn("executor.tools.describe")(function* (
   executor: Executor,
   path: string,
+  options?: { readonly integrations?: readonly string[] },
 ) {
   yield* Effect.annotateCurrentSpan({ "mcp.tool.name": path });
+
+  if (options?.integrations && !options.integrations.includes(extractNamespace(path))) {
+    return {
+      path,
+      name: path,
+      error: {
+        code: "tool_not_found",
+        message: `Tool not found: ${path}`,
+      },
+    } satisfies DescribedTool;
+  }
 
   const builtin = BUILTIN_TOOL_DESCRIPTIONS.get(path);
   if (builtin) return builtin;
@@ -840,11 +882,14 @@ export const describeTool = Effect.fn("executor.tools.describe")(function* (
     const leaf = lastDot === -1 ? path : path.slice(lastDot + 1);
     const scoped = yield* searchTools(executor, leaf, TOOL_DESCRIBE_SUGGESTION_LIMIT, {
       namespace: extractNamespace(path),
+      integrations: options?.integrations,
     });
     const matches =
       scoped.items.length > 0
         ? scoped.items
-        : (yield* searchTools(executor, leaf, TOOL_DESCRIBE_SUGGESTION_LIMIT)).items;
+        : (yield* searchTools(executor, leaf, TOOL_DESCRIBE_SUGGESTION_LIMIT, {
+            integrations: options?.integrations,
+          })).items;
     const suggestions = matches.map((item) => item.path);
     const notFound: DescribedTool = {
       path,

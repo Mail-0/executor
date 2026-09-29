@@ -70,6 +70,7 @@ import {
   CredentialResolutionError,
   IntegrationNotFoundError,
   InvalidConnectionInputError,
+  IntegrationScopeError,
   IntegrationRemovalNotAllowedError,
   NoHandlerError,
   PluginNotLoadedError,
@@ -4298,6 +4299,12 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             ),
           );
 
+        const parsedAddress = parseToolAddress(String(address));
+        const integration = parsedAddress?.integration ?? String(address).split(".")[0] ?? "";
+        if (options?.integrations && !options.integrations.includes(String(integration))) {
+          return yield* new IntegrationScopeError({ address });
+        }
+
         // Static path — O(1) map lookup for plugin-contributed static tools
         // (core-tools, plugin executor namespaces). Addressed by their fqid,
         // not the 5-segment dynamic form.
@@ -4325,7 +4332,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           );
         }
 
-        const parsed = parseToolAddress(String(address));
+        const parsed = parsedAddress;
         if (!parsed) {
           return yield* new ToolNotFoundError({ address });
         }
