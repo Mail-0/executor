@@ -437,7 +437,7 @@ describe("graphqlPlugin real protocol server", () => {
     }),
   );
 
-  it.effect("surfaces non-2xx invocation responses as ToolResult.fail", () =>
+  it.effect("marks only idempotent non-2xx invocation responses retryable", () =>
     Effect.gen(function* () {
       const server = yield* serveTestHttpApp((request) =>
         Effect.gen(function* () {
@@ -447,7 +447,7 @@ describe("graphqlPlugin real protocol server", () => {
             return HttpServerResponse.jsonUnsafe({ data: introspectionResult });
           }
           return HttpServerResponse.text("temporary upstream outage", {
-            status: 503,
+            status: body.includes("mutation") ? 500 : 503,
             contentType: "text/plain",
           });
         }),
@@ -465,18 +465,33 @@ describe("graphqlPlugin real protocol server", () => {
         value: "unused",
       });
 
-      const result = yield* executor.execute(toolAddr("http_error_graph", "main", "query.hello"), {
-        name: "Ada",
-      });
+      const queryResult = yield* executor.execute(
+        toolAddr("http_error_graph", "main", "query.hello"),
+        { name: "Ada" },
+      );
+      const mutationResult = yield* executor.execute(
+        toolAddr("http_error_graph", "main", "mutation.setGreeting"),
+        { message: "hi" },
+      );
 
-      expect(result).toMatchObject({
+      expect(queryResult).toMatchObject({
         ok: false,
         error: {
           code: "graphql_http_error",
           status: 503,
           message: "GraphQL request failed with HTTP 503",
+          retryable: true,
         },
       });
+      expect(mutationResult).toMatchObject({
+        ok: false,
+        error: {
+          code: "graphql_http_error",
+          status: 500,
+          message: "GraphQL request failed with HTTP 500",
+        },
+      });
+      expect(mutationResult).not.toHaveProperty("error.retryable");
     }),
   );
 

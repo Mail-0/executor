@@ -423,6 +423,7 @@ export {
   ToolResult,
   annotateToolResultOutcome,
   isToolFile,
+  isRetryableUpstreamFailure,
   isToolResult,
   type ToolFile,
   type ToolFile as ToolFileValue,

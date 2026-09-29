@@ -17,6 +17,28 @@ export const ToolErrorSchema = Schema.Struct({
 
 export type ToolError = typeof ToolErrorSchema.Type;
 
+export const isRetryableUpstreamFailure = (input: {
+  readonly status?: number;
+  readonly timedOut?: boolean;
+  readonly idempotent: boolean;
+}): boolean => {
+  if (
+    input.status === 408 ||
+    input.status === 425 ||
+    input.status === 429 ||
+    input.status === 503
+  ) {
+    return true;
+  }
+  return (
+    input.idempotent &&
+    (input.timedOut === true ||
+      input.status === 500 ||
+      input.status === 502 ||
+      input.status === 504)
+  );
+};
+
 export const ToolHttpMetaSchema = Schema.Struct({
   status: Schema.Number,
   headers: Schema.Record(Schema.String, Schema.String),

@@ -10,6 +10,7 @@ import {
   IntegrationAlreadyExistsError,
   IntegrationDetectionResult,
   IntegrationSlug,
+  isRetryableUpstreamFailure,
   mergeAuthTemplates,
   sha256Hex,
   ToolName,
@@ -1445,6 +1446,12 @@ export const graphqlPlugin = definePlugin((options?: GraphqlPluginOptions) => {
               data: result.data,
               errors: result.errors,
             },
+            ...(isRetryableUpstreamFailure({
+              status: result.status,
+              idempotent: op.binding.kind === "query",
+            })
+              ? { retryable: true }
+              : {}),
           });
         }
         return ToolResult.ok(result.data);
