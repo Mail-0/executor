@@ -385,6 +385,39 @@ describe("schema-types", () => {
     });
   });
 
+  it("keeps the input shape when only the output schema fails to compile", async () => {
+    const preview = await buildToolTypeScriptPreview({
+      inputSchema: {
+        type: "object",
+        properties: { code: { type: "string" } },
+        required: ["code"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: { result: { $ref: "#/components/schemas/Missing" } },
+      },
+      defs: new Map(),
+    });
+
+    expect(preview.inputTypeScript).toBe("{ code: string; }");
+    expect(preview.outputTypeScript).toBe("unknown");
+  });
+
+  it("keeps the output shape when only the input schema fails to compile", async () => {
+    const preview = await buildToolTypeScriptPreview({
+      inputSchema: { $ref: "#/$defs/Missing" },
+      outputSchema: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+      },
+      defs: new Map(),
+    });
+
+    expect(preview.inputTypeScript).toBe("unknown");
+    expect(preview.outputTypeScript).toBe("{ id: string; }");
+  });
+
   it("renders unconstrained schemas as unknown", async () => {
     await expect(
       buildToolTypeScriptPreview({
