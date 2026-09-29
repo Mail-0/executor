@@ -288,6 +288,23 @@ describe("MCP host server — native elicitation mode", () => {
     expect(scope).toEqual(["alpha"]);
   });
 
+  it("execute tool threads mode through to engine.execute", async () => {
+    const seen: Array<string | undefined> = [];
+    const engine = makeStubEngine({
+      execute: (_code, options) => {
+        seen.push(options.mode);
+        return Effect.succeed({ result: "ok" });
+      },
+    });
+
+    await withNativeClient(engine, ELICITATION_CAPS, async (client) => {
+      await client.callTool({ name: "execute", arguments: { code: "1", mode: "read" } });
+      await client.callTool({ name: "execute", arguments: { code: "1" } });
+    });
+
+    expect(seen).toEqual(["read", undefined]);
+  });
+
   it("execute tool renders emitted file image output as MCP images", async () => {
     const engine = makeStubEngine({
       execute: () =>

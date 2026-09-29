@@ -293,15 +293,19 @@ const policyTestPlugin = definePlugin(() => ({
               description: "delete a deployment",
               annotations: { requiresApproval: true },
             },
+            // No stored annotations: `readOnly` reaches execute only through
+            // the plugin's live `resolveAnnotations`.
+            { name: ToolName.make("lookup"), description: "look up a deployment" },
           ]
         : [{ name: ToolName.make("list"), description: "list repos" }];
     return Effect.succeed({ tools });
   },
   resolveAnnotations: ({ toolRows }) => {
-    const out: Record<string, { requiresApproval?: boolean }> = {};
+    const out: Record<string, { requiresApproval?: boolean; readOnly?: boolean }> = {};
     for (const row of toolRows) {
       out[row.name] = {
         requiresApproval: row.name.toLowerCase().includes("delete"),
+        readOnly: row.name.toLowerCase().includes("lookup"),
       };
     }
     return Effect.succeed(out);
@@ -705,6 +709,101 @@ describe("approve / require_approval interaction with annotations", () => {
         { onElicitation: recordingHandler(calls) },
       );
       expect(calls.count).toBe(1);
+    }),
+  );
+});
+
+describe("read-mode execution", () => {
+  it.effect(
+    "runs a tool classified read-only by the plugin's live annotations, even under an approve policy",
+    () =>
+      Effect.gen(function* () {
+        const executor = yield* setupExecutor();
+        // `lookup` carries no stored annotations — read mode must still consult
+        // resolveAnnotations, even where an approve policy would skip it.
+        yield* executor.policies.create({
+          owner: "org",
+          pattern: "vercel.*.*.lookup",
+          action: "approve",
+        });
+        const out = yield* executor.execute(addr(VERCEL, "lookup"), {}, { mode: "read" });
+        expect(out).toEqual({ ran: "vercel.lookup" });
+      }),
+  );
+
+  it.effect("fails a write tool before the handler runs and fires no elicitation", () =>
+    Effect.gen(function* () {
+      const executor = yield* setupExecutor();
+      const calls = { count: 0 };
+      const result = yield* Effect.result(
+        executor.execute(
+          addr(VERCEL, "delete"),
+          {},
+          { mode: "read", onElicitation: recordingHandler(calls) },
+        ),
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (!Result.isFailure(result)) return;
+      expect(Predicate.isTagged("ReadOnlyModeViolationError")(result.failure)).toBe(true);
+      expect(calls.count).toBe(0);
+    }),
+  );
+
+  it.effect("fails closed on a tool with no read-only classification", () =>
+    Effect.gen(function* () {
+      const executor = yield* setupExecutor();
+      const result = yield* Effect.result(
+        executor.execute(addr(GITHUB, "list"), {}, { mode: "read" }),
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (!Result.isFailure(result)) return;
+      expect(Predicate.isTagged("ReadOnlyModeViolationError")(result.failure)).toBe(true);
+    }),
+  );
+
+  it.effect("an explicit approve policy does not override read mode", () =>
+    Effect.gen(function* () {
+      const executor = yield* setupExecutor();
+      yield* executor.policies.create({
+        owner: "org",
+        pattern: "vercel.*.*.delete",
+        action: "approve",
+      });
+      const result = yield* Effect.result(
+        executor.execute(addr(VERCEL, "delete"), {}, { mode: "read" }),
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (!Result.isFailure(result)) return;
+      expect(Predicate.isTagged("ReadOnlyModeViolationError")(result.failure)).toBe(true);
+    }),
+  );
+
+  it.effect("a block policy still wins in read mode", () =>
+    Effect.gen(function* () {
+      const executor = yield* setupExecutor();
+      yield* executor.policies.create({
+        owner: "org",
+        pattern: "github.*.*.list",
+        action: "block",
+      });
+      const result = yield* Effect.result(
+        executor.execute(addr(GITHUB, "list"), {}, { mode: "read" }),
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (!Result.isFailure(result)) return;
+      expect(Predicate.isTagged("ToolBlockedError")(result.failure)).toBe(true);
+    }),
+  );
+
+  it.effect("default write mode is unchanged", () =>
+    Effect.gen(function* () {
+      const executor = yield* setupExecutor();
+      const out = yield* executor.execute(
+        addr(VERCEL, "delete"),
+        {},
+        { onElicitation: "accept-all" },
+      );
+      expect(out).toEqual({ ran: "vercel.delete" });
     }),
   );
 });

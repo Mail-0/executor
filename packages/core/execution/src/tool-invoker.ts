@@ -253,6 +253,13 @@ const expectedToolFailure = (value: unknown): ToolError | null => {
       details: { path },
     };
   }
+  if (Predicate.isTagged(value, "ReadOnlyModeViolationError") && "address" in value) {
+    return {
+      code: "read_only_mode",
+      message: `Tool is not read-only and this execution runs in read mode: ${addressToPath(String(value.address))}`,
+      details: { path: addressToPath(String(value.address)) },
+    };
+  }
   if (Predicate.isTagged(value, "ToolInvocationError")) {
     const cause = (value as { readonly cause?: unknown }).cause;
     if (isUserActionableError(cause)) {

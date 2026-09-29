@@ -75,6 +75,7 @@ import {
   NoHandlerError,
   PluginNotLoadedError,
   ToolBlockedError,
+  ReadOnlyModeViolationError,
   ToolInvocationError,
   ToolNotFoundError,
   type ExecuteError,
@@ -4193,6 +4194,18 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       return policy.action === "require_approval" || annotations?.requiresApproval === true;
     };
 
+    // Read mode is enforced before the handler runs and irrespective of
+    // policy: a call is only allowed when it is positively classified
+    // read-only — unknown is a write.
+    const enforceReadMode = (
+      annotations: ToolAnnotations | undefined,
+      address: ToolAddress,
+      options: InvokeOptions | undefined,
+    ) =>
+      options?.mode === "read" && annotations?.readOnly !== true
+        ? Effect.fail(new ReadOnlyModeViolationError({ address }))
+        : Effect.void;
+
     const enforceApproval = (
       annotations: ToolAnnotations | undefined,
       address: ToolAddress,
@@ -4322,6 +4335,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
               pattern: policy.pattern ?? "*",
             });
           }
+          yield* enforceReadMode(staticEntry.tool.annotations, address, options);
           yield* enforceApproval(staticEntry.tool.annotations, address, args, policy, handler);
           return yield* wrapInvocationError(
             staticEntry.tool.handler({
@@ -4406,7 +4420,10 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
 
         // Resolve annotations + enforce approval.
         let resolvedAnnotations = annotations;
-        if (policy.action !== "approve" && runtime.plugin.resolveAnnotations) {
+        if (
+          (policy.action !== "approve" || options?.mode === "read") &&
+          runtime.plugin.resolveAnnotations
+        ) {
           const map = yield* runtime.plugin
             .resolveAnnotations({
               ctx: runtime.ctx,
@@ -4427,6 +4444,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
             .validateToolArgs({ ctx: runtime.ctx, toolRow: row, args })
             .pipe(wrapInvocationError);
         }
+        yield* enforceReadMode(resolvedAnnotations, address, options);
         yield* enforceApproval(resolvedAnnotations, address, args, policy, handler);
 
         // Resolve every named credential input (`variable → value`); `value` is
