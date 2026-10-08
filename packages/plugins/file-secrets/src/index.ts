@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Deferred, Effect, Exit, Schema } from "effect";
+import { Deferred, Effect, Exit, Layer, Schema, Semaphore } from "effect";
+import type { HttpClient } from "effect/unstable/http";
 
 import {
   definePlugin,
@@ -10,6 +11,15 @@ import {
   StorageError,
   type CredentialProvider,
 } from "@executor-js/sdk";
+
+import {
+  makeSecretsMirrorClient,
+  resolveSecretsMirror,
+  type SecretsMirrorClient,
+  type SecretsMirrorConfig,
+} from "./mirror";
+
+export { SecretsMirrorError, type SecretsMirrorConfig } from "./mirror";
 
 // ---------------------------------------------------------------------------
 // Auth file location
@@ -186,6 +196,9 @@ const migrateLegacyAuthFile = ({
 export interface FileSecretsPluginConfig {
   /** Override the directory for auth.json (default: EXECUTOR_DATA_DIR, then XDG data dir) */
   readonly directory?: string;
+  /** Durable HTTP mirror for every write (default: EXECUTOR_SECRETS_MIRROR_URL +
+   *  EXECUTOR_SECRETS_MIRROR_TOKEN). `null` disables it. */
+  readonly mirror?: SecretsMirrorConfig | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +221,14 @@ export type FileSecretsExtension = ReturnType<typeof makeFileSecretsExtension>;
 
 const FILE_PROVIDER_KEY = ProviderKey.make("file");
 
-const makeFileProvider = (location: AuthLocation): CredentialProvider => {
+/** How long a failed mirror pull or write waits before the next attempt, so an
+ *  unreachable mirror costs one timeout per window rather than one per read. */
+const MIRROR_RETRY_MS = 30_000;
+
+const makeFileProvider = (
+  location: AuthLocation,
+  mirror: SecretsMirrorClient | null,
+): CredentialProvider => {
   let migrationComplete = false;
   let migrationInFlight: Deferred.Deferred<void, StorageError> | null = null;
   const ensureMigration = Effect.suspend(() => {
@@ -230,48 +250,129 @@ const makeFileProvider = (location: AuthLocation): CredentialProvider => {
     );
   });
 
+  // Mirror state. `pending` holds writes the mirror has not acknowledged yet
+  // (`null` = delete); it wins over the mirror on pull, so a write made while
+  // the mirror was down is never rolled back to the mirror's older value.
+  const lock = Semaphore.makeUnsafe(1);
+  const pending = new Map<string, string | null>();
+  let pulled = mirror === null;
+  let retryAfter = 0;
+
+  const flushItem = (id: string): Effect.Effect<boolean> =>
+    Effect.suspend(() => {
+      const value = pending.get(id);
+      if (mirror === null || value === undefined) return Effect.succeed(true);
+      return (value === null ? mirror.remove(id) : mirror.put(id, value)).pipe(
+        Effect.map(() => {
+          if (pending.get(id) === value) pending.delete(id);
+          return true;
+        }),
+        Effect.catchTag("SecretsMirrorError", (error) =>
+          Effect.logWarning("file secrets: mirror write failed; will retry", error.message).pipe(
+            Effect.as(false),
+          ),
+        ),
+      );
+    });
+
+  const flushPending = Effect.gen(function* () {
+    for (const id of [...pending.keys()]) {
+      if (!(yield* flushItem(id))) return false;
+    }
+    return true;
+  });
+
+  // The mirror is the source of truth for every item it holds: a local file
+  // restored from an older backup must not resurrect a consumed refresh token.
+  // Items only the local file has are seeded up to the mirror.
+  const pull = Effect.gen(function* () {
+    if (mirror === null) return;
+    const remote = yield* mirror.list;
+    const local = yield* readAll(location.filePath);
+    const merged = { ...local };
+    let changed = false;
+    for (const [id, value] of Object.entries(remote)) {
+      if (pending.has(id) || merged[id] === value) continue;
+      merged[id] = value;
+      changed = true;
+    }
+    if (changed) yield* writeAll(location.filePath, merged);
+    for (const [id, value] of Object.entries(local)) {
+      if (!(id in remote) && !pending.has(id)) pending.set(id, value);
+    }
+    pulled = true;
+  });
+
+  const sync = Effect.suspend(() => {
+    if (mirror === null || (pulled && pending.size === 0) || Date.now() < retryAfter) {
+      return Effect.void;
+    }
+    return lock.withPermits(1)(
+      Effect.gen(function* () {
+        const pulledOk = pulled
+          ? true
+          : yield* pull.pipe(
+              Effect.as(true),
+              Effect.catchTag("SecretsMirrorError", (error) =>
+                Effect.logWarning(
+                  "file secrets: mirror pull failed; using the local auth file",
+                  error.message,
+                ).pipe(Effect.as(false)),
+              ),
+            );
+        const ok = pulledOk && (yield* flushPending);
+        if (!ok) retryAfter = Date.now() + MIRROR_RETRY_MS;
+      }),
+    );
+  });
+
+  const ready = ensureMigration.pipe(Effect.andThen(sync));
+
+  const write = (id: ProviderItemId, value: string | null) =>
+    ready.pipe(
+      Effect.andThen(
+        lock.withPermits(1)(
+          Effect.gen(function* () {
+            const data = yield* readAll(location.filePath);
+            if (value === null) {
+              if (id in data) {
+                delete data[id];
+                yield* writeAll(location.filePath, data);
+              }
+            } else {
+              data[id] = value;
+              yield* writeAll(location.filePath, data);
+            }
+            if (mirror === null) return;
+            pending.set(id, value);
+            if (!(yield* flushItem(id))) retryAfter = Date.now() + MIRROR_RETRY_MS;
+          }),
+        ),
+      ),
+    );
+
   return {
     key: FILE_PROVIDER_KEY,
     writable: true,
 
     get: (id: ProviderItemId) =>
-      ensureMigration.pipe(
+      ready.pipe(
         Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
         Effect.map((data) => data[id] ?? null),
       ),
 
     has: (id: ProviderItemId) =>
-      ensureMigration.pipe(
+      ready.pipe(
         Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
         Effect.map((data) => id in data),
       ),
 
-    set: (id: ProviderItemId, value: string) =>
-      ensureMigration.pipe(
-        Effect.andThen(
-          Effect.gen(function* () {
-            const data = yield* readAll(location.filePath);
-            data[id] = value;
-            yield* writeAll(location.filePath, data);
-          }),
-        ),
-      ),
+    set: (id: ProviderItemId, value: string) => write(id, value),
 
-    delete: (id: ProviderItemId) =>
-      ensureMigration.pipe(
-        Effect.andThen(
-          Effect.gen(function* () {
-            const data = yield* readAll(location.filePath);
-            if (id in data) {
-              delete data[id];
-              yield* writeAll(location.filePath, data);
-            }
-          }),
-        ),
-      ),
+    delete: (id: ProviderItemId) => write(id, null),
 
     list: () =>
-      ensureMigration.pipe(
+      ready.pipe(
         Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
         Effect.map((data) =>
           Object.keys(data).map((k) => ({ id: ProviderItemId.make(k), name: k })),
@@ -287,6 +388,18 @@ const makeFileProvider = (location: AuthLocation): CredentialProvider => {
 // performs the one-time migration before its first read or write.
 // ---------------------------------------------------------------------------
 
+/** The `file` provider on its own, for hosts and tests that need it outside a plugin. */
+export const makeFileSecretsProvider = (
+  options: FileSecretsPluginConfig | undefined,
+  httpClientLayer: Layer.Layer<HttpClient.HttpClient>,
+): CredentialProvider => {
+  const mirrorConfig = resolveSecretsMirror(options?.mirror);
+  return makeFileProvider(
+    resolveAuthLocation(options),
+    mirrorConfig === null ? null : makeSecretsMirrorClient(mirrorConfig, httpClientLayer),
+  );
+};
+
 export const fileSecretsPlugin = definePlugin((options?: FileSecretsPluginConfig) => {
   const location = resolveAuthLocation(options);
 
@@ -296,6 +409,8 @@ export const fileSecretsPlugin = definePlugin((options?: FileSecretsPluginConfig
 
     extension: () => makeFileSecretsExtension(location.filePath),
 
-    credentialProviders: (): readonly CredentialProvider[] => [makeFileProvider(location)],
+    credentialProviders: (ctx): readonly CredentialProvider[] => [
+      makeFileSecretsProvider(options, ctx.httpClientLayer),
+    ],
   };
 });
