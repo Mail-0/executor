@@ -531,6 +531,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
           description:
             "List integrations in the workspace catalog (slug, description, owning plugin kind). Connections authenticate against these.",
           outputSchema: IntegrationsListOutputStd,
+          annotations: { readOnly: true },
           execute: (_args, { ctx }) =>
             Effect.map(ctx.core.integrations.list(), (integrations) => ({
               integrations: integrations.map((i) => ({
@@ -548,6 +549,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
             "Given a URL, ask every plugin whether it recognizes it, returning best-confidence matches so the UI can pre-fill onboarding for the right plugin.",
           inputSchema: DetectInputStd,
           outputSchema: DetectOutputStd,
+          annotations: { readOnly: true },
           execute: (input: typeof DetectInput.Type, { ctx }) =>
             Effect.map(ctx.core.integrations.detect(input.url), (results) => ({
               results: results.map((r) => ({
@@ -565,6 +567,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
             "List saved connections and their last health verdict. Never returns credential values. Optionally filter by integration or owner. OAuth scopes are summarized as `oauthScopeCount` by default; pass `verbose: true` to include the full `oauthScope` grant string per connection.",
           inputSchema: ConnectionsListInputStd,
           outputSchema: ConnectionsListOutputStd,
+          annotations: { readOnly: true },
           execute: (input: typeof ConnectionsListInput.Type, { ctx }) =>
             Effect.map(
               ctx.connections.list({
@@ -662,6 +665,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
                 description:
                   "List registered credential provider keys (the storage backends, not API vendors). Use `providers.items` to browse a backend's entries.",
                 outputSchema: ProvidersOutputStd,
+                annotations: { readOnly: true },
                 execute: (_args, { ctx }) =>
                   Effect.map(ctx.providers.list(), (providers) => ({
                     providers: providers.map((p) => String(p)),
@@ -673,6 +677,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
                   "Browse a credential provider's items for discovery (pick a 1Password / keychain entry). Returns opaque ids and labels, never values.",
                 inputSchema: ProviderItemsInputStd,
                 outputSchema: ProviderItemsOutputStd,
+                annotations: { readOnly: true },
                 execute: (input: typeof ProviderItemsInput.Type, { ctx }) =>
                   Effect.map(ctx.providers.items(ProviderKey.make(input.provider)), (items) => ({
                     items: items.map((i) => ({ id: String(i.id), name: i.name })),
@@ -684,6 +689,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
           description:
             "List registered OAuth clients visible to this executor. Returns metadata only; client secrets are never returned.",
           outputSchema: OAuthClientsListOutputStd,
+          annotations: { readOnly: true },
           execute: (_args, { ctx }) =>
             Effect.map(ctx.oauth.listClients(), (clients) => ({
               clients: clients.map((client) => ({
@@ -812,6 +818,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
             "Discover OAuth authorization-server metadata from an issuer or protected-resource URL so client registration can be pre-filled.",
           inputSchema: OAuthProbeInputStd,
           outputSchema: OAuthProbeOutputStd,
+          annotations: { readOnly: true },
           execute: (input: typeof OAuthProbeInput.Type, { ctx }) =>
             Effect.map(ctx.oauth.probe({ url: input.url }), (result) => ({
               issuer: result.issuer ?? null,
@@ -877,6 +884,7 @@ export const coreToolsPlugin = definePlugin((options: CoreToolsPluginOptions = {
           description:
             "List tool policies (approve / require_approval / block) for org and user owners, in evaluation order.",
           outputSchema: PoliciesListOutputStd,
+          annotations: { readOnly: true },
           execute: (_args, { ctx }) =>
             Effect.map(ctx.core.policies.list(), (policies) => ({
               policies: policies.map((p) => ({

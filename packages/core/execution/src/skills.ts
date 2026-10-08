@@ -59,6 +59,7 @@ const EXECUTE_SKILL_BODY = [
   '- `tools.describe.tool()` returns compact TypeScript shapes. Use `inputTypeScript`, `outputTypeScript`, and `typeScriptDefinitions`. If the path doesn\'t resolve, the result carries `error: { code: "tool_not_found", suggestions }` — use a suggestion instead of retrying the same path.',
   "- For tools that return large collections (e.g. `getStates`, `getAll`), filter results in code rather than calling per-item tools.",
   "- Do not use `fetch` — all API calls go through `tools.*`.",
+  '- When the caller passes `mode: "read"`, every tool call that is not classified read-only fails closed — call only GET/HEAD-style reads.',
   "- If execution pauses for interaction, resume it with the returned `resumePayload`.",
   "- TypeScript type syntax (`: T`, `as T`, generics, interfaces, type aliases) is stripped before execution — feel free to write idiomatic TypeScript using the shapes from `tools.describe.tool()`. Decorators and `enum` are not supported.",
 ].join("\n");
