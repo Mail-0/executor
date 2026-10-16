@@ -172,6 +172,32 @@ export const ConnectionsHandlers = HttpApiBuilder.group(ExecutorApi, "connection
         }),
       ),
     )
+    .handle("signOut", ({ params: path, payload }) =>
+      capture(
+        Effect.gen(function* () {
+          const executor = yield* ExecutorService;
+          const result = yield* executor.connections.signOut(
+            {
+              owner: path.owner,
+              integration: path.integration,
+              name: path.name,
+            },
+            payload.revocationUrl !== undefined
+              ? { revocationUrl: payload.revocationUrl }
+              : undefined,
+          );
+          return {
+            removed: result.removed,
+            revocation: {
+              status: result.revocation.status,
+              ...(result.revocation.detail !== undefined
+                ? { detail: result.revocation.detail }
+                : {}),
+            },
+          };
+        }),
+      ),
+    )
     .handle("refresh", ({ params: path }) =>
       capture(
         Effect.gen(function* () {

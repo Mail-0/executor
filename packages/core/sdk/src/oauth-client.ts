@@ -138,6 +138,11 @@ export interface OAuthStartInput {
   readonly newConnection?: boolean;
   /** Browser-facing callback URL for this flow. Defaults to the executor's configured redirectUri. */
   readonly redirectUri?: string | null;
+  /** RFC 6749 `prompt` sent on the authorization request — e.g. `login`
+   *  forces a fresh sign-in even with a live AS session. Overrides the
+   *  provider default (Google's `prompt=consent`); omit for the provider's
+   *  standard behavior. */
+  readonly prompt?: "login" | "select_account" | "consent";
 }
 
 export interface OAuthCompleteInput {

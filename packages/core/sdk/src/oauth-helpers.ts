@@ -439,7 +439,11 @@ const failOAuth2WithHttpSummary = (cause: unknown): Effect.Effect<never, OAuth2E
  *  response URL and a body preview), never token or code material. */
 const withTokenRequestSpan =
   (input: {
-    readonly grantType: "authorization_code" | "client_credentials" | "refresh_token";
+    readonly grantType:
+      | "authorization_code"
+      | "client_credentials"
+      | "refresh_token"
+      | "revocation";
     readonly tokenUrl: string;
     readonly clientAuth: ClientAuthMethod | undefined;
     readonly hasResource: boolean;
@@ -861,6 +865,67 @@ export const refreshAccessToken = (
       tokenUrl: input.tokenUrl,
       clientAuth: input.clientAuth,
       hasResource: input.resource !== undefined,
+    }),
+  );
+
+// ---------------------------------------------------------------------------
+// Revoke a token (RFC 7009)
+// ---------------------------------------------------------------------------
+
+export type RevokeTokenInput = {
+  readonly revocationUrl: string;
+  readonly clientId: string;
+  readonly clientSecret?: string | null;
+  readonly clientAuth?: ClientAuthMethod;
+  readonly token: string;
+  /** RFC 7009 §2.1 `token_type_hint` — `refresh_token` or `access_token`. */
+  readonly tokenTypeHint?: "refresh_token" | "access_token";
+  readonly timeoutMs?: number;
+  readonly endpointUrlPolicy?: OAuthEndpointUrlPolicy;
+  readonly fetch?: typeof globalThis.fetch;
+};
+
+/** Revoke one token at the authorization server's revocation endpoint.
+ *  Succeeds when the endpoint answers 2xx; every other outcome (4xx/5xx,
+ *  network) fails as `OAuth2Error` with the same redacted HTTP summary the
+ *  token-endpoint helpers produce. */
+export const revokeToken = (input: RevokeTokenInput): Effect.Effect<void, OAuth2Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      const as = {
+        ...asFromTokenUrl(input.revocationUrl, input.endpointUrlPolicy),
+        revocation_endpoint: input.revocationUrl,
+      };
+      const client: oauth.Client = { client_id: input.clientId };
+      const clientAuth = pickClientAuth(
+        input.clientSecret,
+        input.clientAuth ?? DEFAULT_CLIENT_AUTH_METHOD,
+      );
+      const response = await oauth.revocationRequest(as, client, clientAuth, input.token, {
+        ...oauth4webapiRequestOptions(
+          input.revocationUrl,
+          input.timeoutMs,
+          input.endpointUrlPolicy,
+          input.fetch,
+        ),
+        ...(input.tokenTypeHint
+          ? {
+              additionalParameters: new URLSearchParams({
+                token_type_hint: input.tokenTypeHint,
+              }),
+            }
+          : {}),
+      });
+      return await oauth.processRevocationResponse(response);
+    },
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catch(failOAuth2WithHttpSummary),
+    withTokenRequestSpan({
+      grantType: "revocation",
+      tokenUrl: input.revocationUrl,
+      clientAuth: input.clientAuth,
+      hasResource: false,
     }),
   );
 

@@ -71,6 +71,13 @@ export interface OAuthTestServerOptions {
    *  name is approved. Mirrors authorization servers (e.g. Mercury) that
    *  reject third-party client names containing their own brand. */
   readonly approveClientName?: (name: string) => boolean;
+  /** Advertise `revocation_endpoint` in the authorization-server metadata and
+   *  serve `POST /revoke`. Defaults off so the suite keeps an AS shape that
+   *  does NOT support revocation (the not_supported cases). */
+  readonly supportRevocation?: boolean;
+  /** Status `POST /revoke` answers with; 200 by default. Set to e.g. 500 to
+   *  model an authorization server whose revocation endpoint fails. */
+  readonly revocationStatus?: number;
 }
 
 export interface OAuthTestServerShape {
@@ -505,6 +512,9 @@ export const serveOAuthTestServer = (
             authorization_endpoint: `${currentIssuerUrl}/authorize`,
             token_endpoint: `${currentIssuerUrl}/token`,
             registration_endpoint: `${currentIssuerUrl}/register`,
+            ...(options.supportRevocation === true
+              ? { revocation_endpoint: `${currentIssuerUrl}/revoke` }
+              : {}),
             response_types_supported: ["code"],
             grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
             code_challenge_methods_supported: ["S256"],
@@ -732,6 +742,13 @@ export const serveOAuthTestServer = (
           }
 
           return oauthError(400, "unsupported_grant_type", "Unsupported grant type");
+        }
+
+        if (requestUrl.pathname === "/revoke" && request.method === "POST") {
+          // RFC 7009: successful revocation answers 200 with an empty body.
+          const status = options.revocationStatus ?? 200;
+          if (status === 200) return textResponse(200, "");
+          return oauthError(status, "server_error", "Revocation endpoint failed");
         }
 
         if (requestUrl.pathname === "/mcp") {

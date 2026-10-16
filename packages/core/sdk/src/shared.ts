@@ -41,6 +41,9 @@ export type {
 export type {
   Connection,
   ConnectionRef,
+  ConnectionRevocationStatus,
+  ConnectionSignOutOptions,
+  ConnectionSignOutResult,
   ConnectionValueInput,
   CreateConnectionInput,
   UpdateConnectionInput,

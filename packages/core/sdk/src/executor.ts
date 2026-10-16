@@ -1,4 +1,4 @@
-import { Effect, Inspectable, Layer, Option, Predicate, Schema } from "effect";
+import { Effect, Inspectable, Layer, Option, Predicate, Result, Schema } from "effect";
 import { FetchHttpClient, type HttpClient } from "effect/unstable/http";
 import { fumadb } from "@executor-js/fumadb";
 import { memoryAdapter } from "@executor-js/fumadb/adapters/memory";
@@ -22,6 +22,8 @@ import type {
   Connection,
   ConnectionInputOrigin,
   ConnectionRef,
+  ConnectionSignOutOptions,
+  ConnectionSignOutResult,
   CreateConnectionInput,
   ConnectionValueInput,
   UpdateConnectionInput,
@@ -164,9 +166,14 @@ import { collectReferencedDefinitions } from "./schema-refs";
 import {
   refreshAccessToken,
   exchangeClientCredentials,
+  isSupportedOAuthEndpointUrl,
+  OAUTH2_DEFAULT_TIMEOUT_MS,
+  OAuth2Error,
+  revokeToken,
   shouldRefreshToken,
   type OAuthEndpointUrlPolicy,
 } from "./oauth-helpers";
+import { discoverAuthorizationServerMetadata } from "./oauth-discovery";
 import { connectionIdentifier } from "./connection-name-identifier";
 import { annotateToolResultOutcome } from "./tool-result";
 import { isUnauthorizedToolFailure } from "./auth-tool-failure";
@@ -334,6 +341,14 @@ export type Executor<TPlugins extends readonly AnyPlugin[] = readonly []> = {
     readonly remove: (
       ref: ConnectionRef,
     ) => Effect.Effect<void, ConnectionNotFoundError | StorageFailure>;
+    /** Sign a connection OUT: revoke its tokens at the authorization server
+     *  (RFC 7009) when possible, then remove it locally. The local removal
+     *  always runs — a failed or unsupported revocation never leaves the
+     *  credential stored. */
+    readonly signOut: (
+      ref: ConnectionRef,
+      options?: ConnectionSignOutOptions,
+    ) => Effect.Effect<ConnectionSignOutResult, ConnectionNotFoundError | StorageFailure>;
     readonly refresh: (
       ref: ConnectionRef,
     ) => Effect.Effect<
@@ -3089,6 +3104,154 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         return rowToConnection(updated ?? row);
       });
 
+    /** The RFC 7009 leg of sign-out, resolved into a status — never fails, so
+     *  the local removal afterwards always runs. Every outcome that kept a
+     *  credential from being posted to the authorization server is
+     *  `not_supported`; a revocation that was actually sent and did not get a
+     *  2xx, or a rejected override URL, is `failed`. */
+    const revokeConnectionTokens = (
+      row: ConnectionRow,
+      overrideUrl: string | undefined,
+    ): Effect.Effect<ConnectionSignOutResult["revocation"], never> =>
+      Effect.gen(function* () {
+        // Static / header / no-auth credentials were never issued by an
+        // authorization server — there is nothing to revoke upstream.
+        if (row.oauth_client == null) return { status: "not_supported" as const };
+
+        const provider = credentialProviders.get(row.provider);
+        // Load the backing app by the owner STORED on the connection (a
+        // Personal connection may be backed by a shared Workspace app) — the
+        // same explicit-owner load the refresh path uses.
+        const clientOwner = (row.oauth_client_owner ?? row.owner) as Owner;
+        const clientRow = yield* loadOAuthClientRow(clientOwner, String(row.oauth_client));
+        if (!provider || !clientRow) return { status: "not_supported" as const };
+
+        const clientSecret = clientRow.client_secret_item_id
+          ? ((yield* provider.get(ProviderItemId.make(String(clientRow.client_secret_item_id)))) ??
+            "")
+          : "";
+        // The endpoint the grant was actually minted at — the regional URL
+        // recorded at connect time when one was rebound, else the app's
+        // configured token URL.
+        const tokenUrl = row.oauth_token_url
+          ? String(row.oauth_token_url)
+          : String(clientRow.token_url);
+        const tokenOrigin = URL.parse(tokenUrl)?.origin;
+        if (tokenOrigin == null) return { status: "not_supported" as const };
+
+        // Revocation endpoint resolution, in order: the authorization server's
+        // own metadata (RFC 8414 `revocation_endpoint`), then a caller override
+        // — accepted only on the token endpoint's origin, since the revocation
+        // request carries the refresh token and client secret.
+        const issuer =
+          clientRow.origin_issuer != null ? String(clientRow.origin_issuer) : tokenOrigin;
+        const discovered = yield* discoverAuthorizationServerMetadata(issuer, {
+          endpointUrlPolicy: config.oauthEndpointUrlPolicy,
+          httpClientLayer: config.httpClientLayer,
+        }).pipe(Effect.catch(() => Effect.succeed(null)));
+        let revocationUrl = discovered?.metadata.revocation_endpoint ?? null;
+        if (
+          revocationUrl != null &&
+          !isSupportedOAuthEndpointUrl(revocationUrl, config.oauthEndpointUrlPolicy)
+        ) {
+          revocationUrl = null;
+        }
+        if (revocationUrl == null && overrideUrl != null) {
+          if (
+            isSupportedOAuthEndpointUrl(overrideUrl, config.oauthEndpointUrlPolicy) &&
+            URL.parse(overrideUrl)?.origin === tokenOrigin
+          ) {
+            revocationUrl = overrideUrl;
+          } else {
+            return {
+              status: "failed" as const,
+              detail:
+                "Revocation URL override rejected: it must be a supported OAuth endpoint URL " +
+                "on the same origin as the token endpoint.",
+            };
+          }
+        }
+        if (revocationUrl == null) return { status: "not_supported" as const };
+
+        const revoke = (token: string, tokenTypeHint: "refresh_token" | "access_token") =>
+          revokeToken({
+            revocationUrl,
+            clientId: String(clientRow.client_id),
+            clientSecret,
+            token,
+            tokenTypeHint,
+            timeoutMs: OAUTH2_DEFAULT_TIMEOUT_MS,
+            endpointUrlPolicy: config.oauthEndpointUrlPolicy,
+            fetch: config.fetch,
+          }).pipe(Effect.result);
+
+        const accessItemId =
+          connectionItemIds(row)[PRIMARY_INPUT_VARIABLE] ??
+          `connection:${row.owner}:${row.integration}:${row.name}:${PRIMARY_INPUT_VARIABLE}`;
+        const refreshToken = row.refresh_item_id
+          ? yield* provider.get(ProviderItemId.make(row.refresh_item_id))
+          : null;
+        const accessToken = yield* provider.get(ProviderItemId.make(accessItemId));
+
+        const isOAuth2Error = Predicate.isTagged("OAuth2Error") as (
+          cause: unknown,
+        ) => cause is OAuth2Error;
+        const failureDetail = (cause: unknown): string =>
+          // oxlint-disable-next-line executor/no-unknown-error-message -- boundary: OAuth2Error carries a typed `message` field already scrubbed of token material
+          `Token revocation failed: ${isOAuth2Error(cause) ? cause.message : "authorization server unreachable"}`;
+
+        // Refresh token first: revoking it kills the whole grant. The access
+        // token revocation is best-effort — its outcome cannot change the
+        // verdict the refresh-token revocation already produced.
+        if (refreshToken) {
+          const first = yield* revoke(refreshToken, "refresh_token");
+          if (accessToken) {
+            yield* revoke(accessToken, "access_token");
+          }
+          if (Result.isSuccess(first)) return { status: "revoked" as const };
+          return { status: "failed" as const, detail: failureDetail(first.failure) };
+        }
+        if (accessToken) {
+          const only = yield* revoke(accessToken, "access_token");
+          if (Result.isSuccess(only)) return { status: "revoked" as const };
+          return { status: "failed" as const, detail: failureDetail(only.failure) };
+        }
+        return { status: "not_supported" as const, detail: "No stored token material." };
+      }).pipe(
+        Effect.catch(() => Effect.succeed({ status: "not_supported" as const })),
+        Effect.tap((outcome) =>
+          Effect.annotateCurrentSpan({ "executor.oauth.revoke.status": outcome.status }),
+        ),
+        Effect.withSpan("executor.oauth.revoke", {
+          attributes: {
+            "executor.tenant": tenant,
+            ...(subject != null ? { "executor.subject": subject } : {}),
+            "executor.integration": String(row.integration),
+            "executor.connection": String(row.name),
+          },
+        }),
+      );
+
+    const connectionsSignOut = (
+      ref: ConnectionRef,
+      options?: ConnectionSignOutOptions,
+    ): Effect.Effect<ConnectionSignOutResult, ConnectionNotFoundError | StorageFailure> =>
+      Effect.gen(function* () {
+        const row = yield* findConnectionRow(ref);
+        if (!row) {
+          return yield* new ConnectionNotFoundError({
+            owner: ref.owner,
+            integration: ref.integration,
+            name: ref.name,
+          });
+        }
+        const revocation = yield* revokeConnectionTokens(row, options?.revocationUrl);
+        // Always remove: sign-out must never leave the credential stored
+        // locally, whatever the revocation leg produced.
+        yield* connectionsRemove(ref);
+        return { removed: true as const, revocation };
+      });
+
     const connectionsRemove = (
       ref: ConnectionRef,
     ): Effect.Effect<void, ConnectionNotFoundError | StorageFailure> =>
@@ -4904,6 +5067,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         get: connectionsGet,
         update: connectionsUpdate,
         remove: connectionsRemove,
+        signOut: connectionsSignOut,
         refresh: connectionsRefresh,
         checkHealth: connectionCheckHealth,
         validate: connectionValidate,

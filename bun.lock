@@ -614,6 +614,7 @@
         "@effect/atom-react": "catalog:",
         "@effect/platform-node": "catalog:",
         "@effect/vitest": "catalog:",
+        "@executor-js/emulate": "^0.13.6",
         "@libsql/client": "catalog:",
         "@types/node": "catalog:",
         "@types/react": "catalog:",
