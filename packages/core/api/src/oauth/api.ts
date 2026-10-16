@@ -164,6 +164,10 @@ const StartPayload = Schema.Struct({
    *  name server-side instead of re-minting the existing row. */
   newConnection: Schema.optional(Schema.Boolean),
   redirectUri: Schema.optional(Schema.NullOr(Schema.String)),
+  /** RFC 6749 `prompt` passthrough — e.g. `login` forces a fresh sign-in even
+   *  when the authorization server still has a session. An explicit value
+   *  overrides the provider default (Google's `prompt=consent`). */
+  prompt: Schema.optional(Schema.Literals(["login", "select_account", "consent"])),
 });
 
 const StartResponse = Schema.Union([

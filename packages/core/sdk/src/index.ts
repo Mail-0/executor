@@ -95,6 +95,9 @@ export { freshCustomAuthSlug, mergeAuthTemplates } from "./integration";
 export type {
   Connection,
   ConnectionRef,
+  ConnectionRevocationStatus,
+  ConnectionSignOutOptions,
+  ConnectionSignOutResult,
   ConnectionValueInput,
   CreateConnectionInput,
   UpdateConnectionInput,

@@ -123,3 +123,27 @@ export interface UpdateConnectionInput {
   readonly description?: string | null;
   readonly identityLabel?: string | null;
 }
+
+/** Outcome of the RFC 7009 revocation leg of `connections.signOut`:
+ *  `revoked` — the authorization server accepted the first revocation sent;
+ *  `not_supported` — nothing revocable (static credential, no revocation
+ *  endpoint advertised, or no stored token material); `failed` — a revocation
+ *  was attempted (or its URL resolved) and did not succeed. The connection is
+ *  removed locally regardless. */
+export type ConnectionRevocationStatus = "revoked" | "not_supported" | "failed";
+
+export interface ConnectionSignOutResult {
+  readonly removed: true;
+  readonly revocation: {
+    readonly status: ConnectionRevocationStatus;
+    readonly detail?: string;
+  };
+}
+
+export interface ConnectionSignOutOptions {
+  /** Explicit revocation endpoint to use when the authorization server's
+   *  metadata does not advertise one. Accepted only when it shares the token
+   *  endpoint's origin — the refresh token and client secret are never posted
+   *  to a host other than the AS that issued them. */
+  readonly revocationUrl?: string;
+}

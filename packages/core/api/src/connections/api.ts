@@ -226,6 +226,25 @@ export const ConnectionsApi = HttpApiGroup.make("connections")
       error: [InternalError, ConnectionNotFound],
     }),
   )
+  // Sign out: revoke the connection's tokens at the authorization server
+  // (RFC 7009) when possible, then remove the local credential — the removal
+  // always runs, whatever the revocation leg produced.
+  .add(
+    HttpApiEndpoint.post("signOut", "/connections/:owner/:integration/:name/sign-out", {
+      params: ConnectionParams,
+      payload: Schema.Struct({
+        revocationUrl: Schema.optional(Schema.String),
+      }),
+      success: Schema.Struct({
+        removed: Schema.Boolean,
+        revocation: Schema.Struct({
+          status: Schema.Literals(["revoked", "not_supported", "failed"]),
+          detail: Schema.optional(Schema.String),
+        }),
+      }),
+      error: [InternalError, ConnectionNotFound],
+    }),
+  )
   .add(
     HttpApiEndpoint.post("refresh", "/connections/:owner/:integration/:name/refresh", {
       params: ConnectionParams,
