@@ -28,13 +28,28 @@ export interface SecretsMirrorConfig {
   readonly tokenFile?: string;
 }
 
+// Like the file key, the token leaves the environment once read so nothing
+// the process spawns inherits a credential for the mirror.
+const environmentToken: { taken: boolean; value: string | undefined } = {
+  taken: false,
+  value: undefined,
+};
+
+const takeEnvironmentToken = (): string | undefined => {
+  if (!environmentToken.taken) {
+    environmentToken.value = process.env.EXECUTOR_SECRETS_MIRROR_TOKEN;
+    environmentToken.taken = true;
+    delete process.env.EXECUTOR_SECRETS_MIRROR_TOKEN;
+  }
+  return environmentToken.value;
+};
+
 /** `null` disables the mirror; `undefined` reads EXECUTOR_SECRETS_MIRROR_URL/_TOKEN/_TOKEN_FILE. */
 export const resolveSecretsMirror = (
   configured: SecretsMirrorConfig | null | undefined,
 ): SecretsMirrorConfig | null => {
   const url = configured === undefined ? process.env.EXECUTOR_SECRETS_MIRROR_URL : configured?.url;
-  const token =
-    configured === undefined ? process.env.EXECUTOR_SECRETS_MIRROR_TOKEN : configured?.token;
+  const token = configured === undefined ? takeEnvironmentToken() : configured?.token;
   const tokenFile = (
     configured === undefined
       ? process.env.EXECUTOR_SECRETS_MIRROR_TOKEN_FILE

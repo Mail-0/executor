@@ -101,7 +101,7 @@ class AuthFileDecodeError extends Schema.TaggedErrorClass<AuthFileDecodeError>()
 // ---------------------------------------------------------------------------
 // Optional encryption at rest
 //
-// With a key (EXECUTOR_SECRETS_FILE_KEY or `encryptionKey`), auth.json holds a
+// With a key (EXECUTOR_SECRETS_FILE_KEY_FILE, EXECUTOR_SECRETS_FILE_KEY or `encryptionKey`), auth.json holds a
 // single AES-256-GCM envelope instead of the JSON map, so copies of the data
 // directory (backups, snapshots) never contain credential values. A plaintext
 // file found while a key is set is rewritten encrypted on first use.
@@ -114,10 +114,31 @@ interface AuthFileCipher {
   readonly key: Buffer;
 }
 
+// The key leaves the environment the first time it is read, so nothing the
+// process spawns afterwards inherits it. A key file
+// (EXECUTOR_SECRETS_FILE_KEY_FILE) is read once and removed for the same
+// reason; one that cannot be read fails startup rather than falling back to a
+// plaintext auth file.
+const environmentKey: { taken: boolean; value: string | undefined } = {
+  taken: false,
+  value: undefined,
+};
+
+const takeEnvironmentKey = (): string | undefined => {
+  if (!environmentKey.taken) {
+    const keyFile = process.env.EXECUTOR_SECRETS_FILE_KEY_FILE?.trim();
+    const fromFile = keyFile ? fs.readFileSync(keyFile, "utf-8").trim() : undefined;
+    if (keyFile) fs.rmSync(keyFile, { force: true });
+    environmentKey.value = fromFile || process.env.EXECUTOR_SECRETS_FILE_KEY?.trim() || undefined;
+    environmentKey.taken = true;
+    delete process.env.EXECUTOR_SECRETS_FILE_KEY;
+    delete process.env.EXECUTOR_SECRETS_FILE_KEY_FILE;
+  }
+  return environmentKey.value;
+};
+
 const resolveCipher = (configured: string | null | undefined): AuthFileCipher | null => {
-  const master = (
-    configured === undefined ? process.env.EXECUTOR_SECRETS_FILE_KEY : configured
-  )?.trim();
+  const master = (configured === undefined ? takeEnvironmentKey() : configured)?.trim();
   return master ? { key: scryptSync(master, KEY_SALT, 32) } : null;
 };
 
@@ -301,7 +322,8 @@ export interface FileSecretsPluginConfig {
    *  EXECUTOR_SECRETS_MIRROR_TOKEN or EXECUTOR_SECRETS_MIRROR_TOKEN_FILE). `null` disables it. */
   readonly mirror?: SecretsMirrorConfig | null;
   /** Encrypt auth.json at rest with a key derived from this value (default:
-   *  EXECUTOR_SECRETS_FILE_KEY). `null` or empty keeps the plaintext file. */
+   *  EXECUTOR_SECRETS_FILE_KEY_FILE, then EXECUTOR_SECRETS_FILE_KEY; both are
+   *  removed from the environment once read). `null` or empty keeps the plaintext file. */
   readonly encryptionKey?: string | null;
 }
 
