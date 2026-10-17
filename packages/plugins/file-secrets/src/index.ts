@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Deferred, Effect, Exit, Layer, Schema, Semaphore } from "effect";
@@ -99,6 +99,86 @@ class AuthFileDecodeError extends Schema.TaggedErrorClass<AuthFileDecodeError>()
 }
 
 // ---------------------------------------------------------------------------
+// Optional encryption at rest
+//
+// With a key (EXECUTOR_SECRETS_FILE_KEY_FILE, EXECUTOR_SECRETS_FILE_KEY or `encryptionKey`), auth.json holds a
+// single AES-256-GCM envelope instead of the JSON map, so copies of the data
+// directory (backups, snapshots) never contain credential values. A plaintext
+// file found while a key is set is rewritten encrypted on first use.
+// ---------------------------------------------------------------------------
+
+const ENVELOPE_PREFIX = "executor-encrypted:v1.";
+const KEY_SALT = "executor-file-secrets/v1";
+
+interface AuthFileCipher {
+  readonly key: Buffer;
+}
+
+// The key leaves the environment the first time it is read, so nothing the
+// process spawns afterwards inherits it. A key file
+// (EXECUTOR_SECRETS_FILE_KEY_FILE) is read once and removed for the same
+// reason; one that cannot be read fails startup rather than falling back to a
+// plaintext auth file.
+const environmentKey: { taken: boolean; value: string | undefined } = {
+  taken: false,
+  value: undefined,
+};
+
+const takeEnvironmentKey = (): string | undefined => {
+  if (!environmentKey.taken) {
+    const keyFile = process.env.EXECUTOR_SECRETS_FILE_KEY_FILE?.trim();
+    const fromFile = keyFile ? fs.readFileSync(keyFile, "utf-8").trim() : undefined;
+    if (keyFile) fs.rmSync(keyFile, { force: true });
+    environmentKey.value = fromFile || process.env.EXECUTOR_SECRETS_FILE_KEY?.trim() || undefined;
+    environmentKey.taken = true;
+    delete process.env.EXECUTOR_SECRETS_FILE_KEY;
+    delete process.env.EXECUTOR_SECRETS_FILE_KEY_FILE;
+  }
+  return environmentKey.value;
+};
+
+const resolveCipher = (configured: string | null | undefined): AuthFileCipher | null => {
+  const master = (configured === undefined ? takeEnvironmentKey() : configured)?.trim();
+  return master ? { key: scryptSync(master, KEY_SALT, 32) } : null;
+};
+
+const sealAuthFile = (cipher: AuthFileCipher, json: string): string => {
+  const iv = randomBytes(12);
+  const aes = createCipheriv("aes-256-gcm", cipher.key, iv);
+  const data = Buffer.concat([aes.update(json, "utf8"), aes.final()]);
+  return `${ENVELOPE_PREFIX}${[iv, aes.getAuthTag(), data].map((b) => b.toString("base64")).join(".")}`;
+};
+
+const openAuthFile = (cipher: AuthFileCipher, raw: string): string => {
+  const [iv, tag, data] = raw
+    .slice(ENVELOPE_PREFIX.length)
+    .trim()
+    .split(".")
+    .map((part) => Buffer.from(part, "base64"));
+  const aes = createDecipheriv("aes-256-gcm", cipher.key, iv ?? Buffer.alloc(0));
+  aes.setAuthTag(tag ?? Buffer.alloc(0));
+  return Buffer.concat([aes.update(data ?? Buffer.alloc(0)), aes.final()]).toString("utf8");
+};
+
+class AuthFileCipherError extends Schema.TaggedErrorClass<AuthFileCipherError>()(
+  "AuthFileCipherError",
+  {
+    filePath: Schema.String,
+    reason: Schema.Literals(["missing-key", "undecryptable"]),
+  },
+  {
+    description:
+      "The auth file is encrypted and either no key is configured or the configured key does not open it. With a durable mirror the provider restores the items from the mirror; otherwise the failure is surfaced and the file is left untouched.",
+  },
+) {
+  override get message(): string {
+    return this.reason === "missing-key"
+      ? `Auth file is encrypted but no EXECUTOR_SECRETS_FILE_KEY is set: ${this.filePath}`
+      : `Auth file could not be decrypted with the configured key: ${this.filePath}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // File I/O with restricted permissions
 //
 // These helpers keep real I/O and decode failures distinct internally, then
@@ -117,8 +197,16 @@ const toStorageError =
 
 const readAuthFile = (
   filePath: string,
-): Effect.Effect<Record<string, string>, StorageError | AuthFileDecodeError> => {
+  cipher: AuthFileCipher | null,
+): Effect.Effect<
+  Record<string, string>,
+  StorageError | AuthFileDecodeError | AuthFileCipherError
+> => {
   if (!fs.existsSync(filePath)) return Effect.succeed({});
+  const decode = (raw: string) =>
+    decodeFlatAuthFile(raw).pipe(
+      Effect.mapError((cause) => new AuthFileDecodeError({ filePath, cause })),
+    );
   return Effect.try({
     try: () => fs.readFileSync(filePath, "utf-8"),
     catch: toStorageError("Failed to read auth file"),
@@ -127,26 +215,44 @@ const readAuthFile = (
       (error: StorageError) => isFileNotFoundCause(error.cause),
       () => Effect.succeed(""),
     ),
-    Effect.flatMap((raw: string) =>
-      raw === ""
-        ? Effect.succeed<Record<string, string>>({})
-        : decodeFlatAuthFile(raw).pipe(
-            Effect.mapError((cause) => new AuthFileDecodeError({ filePath, cause })),
-          ),
-    ),
+    Effect.flatMap((raw: string) => {
+      if (raw === "") return Effect.succeed<Record<string, string>>({});
+      if (!raw.startsWith(ENVELOPE_PREFIX)) return decode(raw);
+      if (cipher === null) {
+        return Effect.fail(new AuthFileCipherError({ filePath, reason: "missing-key" }));
+      }
+      return Effect.try({
+        try: () => openAuthFile(cipher, raw),
+        catch: () => new AuthFileCipherError({ filePath, reason: "undecryptable" }),
+      }).pipe(Effect.flatMap(decode));
+    }),
   );
 };
 
-const readAll = (filePath: string): Effect.Effect<Record<string, string>, StorageError> =>
-  readAuthFile(filePath).pipe(
-    Effect.catchTag("AuthFileDecodeError", (cause) =>
-      Effect.fail(new StorageError({ message: cause.message, cause })),
-    ),
+const isEncryptedAuthFile = (filePath: string): Effect.Effect<boolean, StorageError> =>
+  Effect.try({
+    try: () =>
+      fs.existsSync(filePath) && fs.readFileSync(filePath, "utf-8").startsWith(ENVELOPE_PREFIX),
+    catch: toStorageError("Failed to read auth file"),
+  });
+
+const readAll = (
+  filePath: string,
+  cipher: AuthFileCipher | null,
+): Effect.Effect<Record<string, string>, StorageError> =>
+  readAuthFile(filePath, cipher).pipe(
+    Effect.catchTags({
+      AuthFileDecodeError: (cause) =>
+        Effect.fail(new StorageError({ message: cause.message, cause })),
+      AuthFileCipherError: (cause) =>
+        Effect.fail(new StorageError({ message: cause.message, cause })),
+    }),
   );
 
 const writeAll = (
   filePath: string,
   secrets: Record<string, string>,
+  cipher: AuthFileCipher | null,
 ): Effect.Effect<void, StorageError> => {
   const dir = path.dirname(filePath);
   const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
@@ -159,7 +265,8 @@ const writeAll = (
     }
     yield* Effect.try({
       try: () => {
-        fs.writeFileSync(tmp, JSON.stringify(secrets, null, 2), { mode: 0o600 });
+        const json = JSON.stringify(secrets, null, 2);
+        fs.writeFileSync(tmp, cipher === null ? json : sealAuthFile(cipher, json), { mode: 0o600 });
         // `mode` only applies when the file is created; chmod afterwards covers
         // the case where a temporary file with broader permissions already exists.
         fs.chmodSync(tmp, 0o600);
@@ -173,21 +280,36 @@ const writeAll = (
   });
 };
 
-const migrateLegacyAuthFile = ({
-  filePath,
-  legacyFilePath,
-}: AuthLocation): Effect.Effect<void, StorageError> => {
+const migrateLegacyAuthFile = (
+  { filePath, legacyFilePath }: AuthLocation,
+  cipher: AuthFileCipher | null,
+): Effect.Effect<void, StorageError> => {
   if (legacyFilePath === null || fs.existsSync(filePath) || !fs.existsSync(legacyFilePath)) {
     return Effect.void;
   }
 
-  return readAuthFile(legacyFilePath).pipe(
-    Effect.flatMap((secrets) => writeAll(filePath, secrets)),
-    // Malformed legacy contents are deliberately skipped. Genuine read I/O
-    // failures stay visible and leave migration eligible for a later retry.
-    Effect.catchTag("AuthFileDecodeError", () => Effect.void),
+  return readAuthFile(legacyFilePath, cipher).pipe(
+    Effect.flatMap((secrets) => writeAll(filePath, secrets, cipher)),
+    // Malformed or unreadable legacy contents are deliberately skipped. Genuine
+    // read I/O failures stay visible and leave migration eligible for a later retry.
+    Effect.catchTags({
+      AuthFileDecodeError: () => Effect.void,
+      AuthFileCipherError: () => Effect.void,
+    }),
   );
 };
+
+/** Rewrites a plaintext auth file encrypted once a key is configured. */
+const encryptPlaintextAuthFile = (
+  filePath: string,
+  cipher: AuthFileCipher | null,
+): Effect.Effect<void, StorageError> =>
+  Effect.gen(function* () {
+    if (cipher === null || !fs.existsSync(filePath) || (yield* isEncryptedAuthFile(filePath)))
+      return;
+    const secrets = yield* readAll(filePath, null);
+    yield* writeAll(filePath, secrets, cipher);
+  });
 
 // ---------------------------------------------------------------------------
 // Plugin config
@@ -197,8 +319,12 @@ export interface FileSecretsPluginConfig {
   /** Override the directory for auth.json (default: EXECUTOR_DATA_DIR, then XDG data dir) */
   readonly directory?: string;
   /** Durable HTTP mirror for every write (default: EXECUTOR_SECRETS_MIRROR_URL +
-   *  EXECUTOR_SECRETS_MIRROR_TOKEN). `null` disables it. */
+   *  EXECUTOR_SECRETS_MIRROR_TOKEN or EXECUTOR_SECRETS_MIRROR_TOKEN_FILE). `null` disables it. */
   readonly mirror?: SecretsMirrorConfig | null;
+  /** Encrypt auth.json at rest with a key derived from this value (default:
+   *  EXECUTOR_SECRETS_FILE_KEY_FILE, then EXECUTOR_SECRETS_FILE_KEY; both are
+   *  removed from the environment once read). `null` or empty keeps the plaintext file. */
+  readonly encryptionKey?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +354,7 @@ const MIRROR_RETRY_MS = 30_000;
 const makeFileProvider = (
   location: AuthLocation,
   mirror: SecretsMirrorClient | null,
+  cipher: AuthFileCipher | null,
 ): CredentialProvider => {
   let migrationComplete = false;
   let migrationInFlight: Deferred.Deferred<void, StorageError> | null = null;
@@ -239,7 +366,8 @@ const makeFileProvider = (
     // fiber can only observe either no attempt or this fully initialized one.
     const latch = Deferred.makeUnsafe<void, StorageError>();
     migrationInFlight = latch;
-    return migrateLegacyAuthFile(location).pipe(
+    return migrateLegacyAuthFile(location, cipher).pipe(
+      Effect.andThen(encryptPlaintextAuthFile(location.filePath, cipher)),
       Effect.onExit((exit) =>
         Effect.gen(function* () {
           if (Exit.isSuccess(exit)) migrationComplete = true;
@@ -288,16 +416,27 @@ const makeFileProvider = (
   const pull = Effect.gen(function* () {
     if (mirror === null) return;
     const remote = yield* mirror.list;
-    const local = yield* readAll(location.filePath);
+    // A local file this key cannot open is rebuilt from the mirror.
+    const local = yield* readAuthFile(location.filePath, cipher).pipe(
+      Effect.catchTags({
+        AuthFileCipherError: (error) =>
+          Effect.logWarning(
+            "file secrets: local auth file cannot be decrypted; restoring from the mirror",
+            error.message,
+          ).pipe(Effect.as(null)),
+        AuthFileDecodeError: (cause) =>
+          Effect.fail(new StorageError({ message: cause.message, cause })),
+      }),
+    );
     const merged = { ...local };
-    let changed = false;
+    let changed = local === null;
     for (const [id, value] of Object.entries(remote)) {
       if (pending.has(id) || merged[id] === value) continue;
       merged[id] = value;
       changed = true;
     }
-    if (changed) yield* writeAll(location.filePath, merged);
-    for (const [id, value] of Object.entries(local)) {
+    if (changed) yield* writeAll(location.filePath, merged, cipher);
+    for (const [id, value] of Object.entries(local ?? {})) {
       if (!(id in remote) && !pending.has(id)) pending.set(id, value);
     }
     pulled = true;
@@ -333,15 +472,15 @@ const makeFileProvider = (
       Effect.andThen(
         lock.withPermits(1)(
           Effect.gen(function* () {
-            const data = yield* readAll(location.filePath);
+            const data = yield* readAll(location.filePath, cipher);
             if (value === null) {
               if (id in data) {
                 delete data[id];
-                yield* writeAll(location.filePath, data);
+                yield* writeAll(location.filePath, data, cipher);
               }
             } else {
               data[id] = value;
-              yield* writeAll(location.filePath, data);
+              yield* writeAll(location.filePath, data, cipher);
             }
             if (mirror === null) return;
             pending.set(id, value);
@@ -357,13 +496,13 @@ const makeFileProvider = (
 
     get: (id: ProviderItemId) =>
       ready.pipe(
-        Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
+        Effect.andThen(Effect.suspend(() => readAll(location.filePath, cipher))),
         Effect.map((data) => data[id] ?? null),
       ),
 
     has: (id: ProviderItemId) =>
       ready.pipe(
-        Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
+        Effect.andThen(Effect.suspend(() => readAll(location.filePath, cipher))),
         Effect.map((data) => id in data),
       ),
 
@@ -373,7 +512,7 @@ const makeFileProvider = (
 
     list: () =>
       ready.pipe(
-        Effect.andThen(Effect.suspend(() => readAll(location.filePath))),
+        Effect.andThen(Effect.suspend(() => readAll(location.filePath, cipher))),
         Effect.map((data) =>
           Object.keys(data).map((k) => ({ id: ProviderItemId.make(k), name: k })),
         ),
@@ -397,6 +536,7 @@ export const makeFileSecretsProvider = (
   return makeFileProvider(
     resolveAuthLocation(options),
     mirrorConfig === null ? null : makeSecretsMirrorClient(mirrorConfig, httpClientLayer),
+    resolveCipher(options?.encryptionKey),
   );
 };
 
