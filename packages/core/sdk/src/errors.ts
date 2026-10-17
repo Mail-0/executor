@@ -93,6 +93,17 @@ export class IntegrationScopeError extends Schema.TaggedErrorClass<IntegrationSc
   }
 }
 
+/** Tool invocation was rejected because the execution runs in read mode and
+ *  the call is not positively classified read-only. */
+export class ReadOnlyModeViolationError extends Schema.TaggedErrorClass<ReadOnlyModeViolationError>()(
+  "ReadOnlyModeViolationError",
+  { address: ToolAddress },
+) {
+  override get message(): string {
+    return `Tool is not read-only and this execution runs in read mode: ${this.address}`;
+  }
+}
+
 /** Tool row exists but its owning plugin isn't loaded in this executor config. */
 export class PluginNotLoadedError extends Schema.TaggedErrorClass<PluginNotLoadedError>()(
   "PluginNotLoadedError",
@@ -235,6 +246,7 @@ export type ExecuteError =
   | ToolInvocationError
   | ToolBlockedError
   | IntegrationScopeError
+  | ReadOnlyModeViolationError
   | PluginNotLoadedError
   | NoHandlerError
   | ConnectionNotFoundError

@@ -425,6 +425,7 @@ const toToolDef = (entry: McpToolManifestEntry): ToolDef => {
   const annotations: StampedAnnotations = {
     requiresApproval: destructive,
     ...(destructive ? { approvalDescription: entry.annotations?.title ?? entry.toolName } : {}),
+    readOnly: entry.annotations?.readOnlyHint === true,
     mcp: stamp,
   };
   return {
@@ -1502,9 +1503,13 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
             out[String(row.name)] = {
               requiresApproval: true,
               approvalDescription: ann.title ?? stamp?.toolName ?? String(row.name),
+              readOnly: ann.readOnlyHint === true,
             };
           } else {
-            out[String(row.name)] = { requiresApproval: false };
+            out[String(row.name)] = {
+              requiresApproval: false,
+              readOnly: ann?.readOnlyHint === true,
+            };
           }
         }
         return out;

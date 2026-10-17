@@ -37,6 +37,7 @@ import {
   typeCheckOutputTypeScript,
 } from "@executor-js/sdk/testing";
 
+import { annotationsForOperation } from "./invoke";
 import { openApiPlugin } from "./plugin";
 import { type AuthenticationInput } from "./types";
 import {
@@ -1447,4 +1448,15 @@ paths:
   // connection IS the credential, sources became integrations with an opaque
   // config, and the scope stack collapsed to a single owner. Auth is now applied
   // through the integration's `authenticationTemplate` (covered above).
+});
+
+describe("annotationsForOperation", () => {
+  it("marks idempotent methods read-only and keeps writes approval-gated", () => {
+    expect(annotationsForOperation("get", "/items")).toEqual({ readOnly: true });
+    expect(annotationsForOperation("head", "/items")).toEqual({ readOnly: true });
+    expect(annotationsForOperation("options", "/items")).toEqual({ readOnly: true });
+    const post = annotationsForOperation("post", "/items");
+    expect(post.requiresApproval).toBe(true);
+    expect(post).not.toHaveProperty("readOnly");
+  });
 });

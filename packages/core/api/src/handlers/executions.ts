@@ -206,7 +206,7 @@ export const ExecutionsHandlers = HttpApiBuilder.group(ExecutorApi, "executions"
               ? payload.code
               : yield* resolveArtifactCode(payload.code, payload.artifactId);
           const outcome = yield* captureEngineError(
-            engine.executeWithPause(code, { autoApprove: payload.autoApprove }),
+            engine.executeWithPause(code, { autoApprove: payload.autoApprove, mode: payload.mode }),
           );
 
           if (outcome.status === "completed") {

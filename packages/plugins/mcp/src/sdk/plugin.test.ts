@@ -955,6 +955,19 @@ describe("MCP destructiveHint → requiresApproval", () => {
     }),
   );
 
+  it.effect("readOnlyHint becomes readOnly, only for the annotated tool", () =>
+    Effect.gen(function* () {
+      const server = yield* serveAnnotationsTestServer;
+      const executor = yield* seedAnnotationsExecutor(server.url);
+
+      const tools = yield* executor.tools.list();
+
+      expect(tools.find((t) => String(t.name) === "list")?.annotations?.readOnly).toBe(true);
+      expect(tools.find((t) => String(t.name) === "delete")?.annotations?.readOnly).toBe(false);
+      expect(tools.find((t) => String(t.name) === "ping")?.annotations?.readOnly).toBe(false);
+    }),
+  );
+
   it.effect("uses annotations.title as approvalDescription when present", () =>
     Effect.gen(function* () {
       const server = yield* serveAnnotationsTestServer;

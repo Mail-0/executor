@@ -1361,9 +1361,12 @@ export const REQUIRE_APPROVAL = new Set(["post", "put", "patch", "delete"]);
 export const annotationsForOperation = (
   method: string,
   pathTemplate: string,
-): { requiresApproval?: boolean; approvalDescription?: string } => {
+): { requiresApproval?: boolean; approvalDescription?: string; readOnly?: boolean } => {
   const m = method.toLowerCase();
-  if (!REQUIRE_APPROVAL.has(m)) return {};
+  if (!REQUIRE_APPROVAL.has(m)) {
+    // Reads are only the idempotent verbs — anything else fails closed.
+    return m === "get" || m === "head" || m === "options" ? { readOnly: true } : {};
+  }
   return {
     requiresApproval: true,
     approvalDescription: `${method.toUpperCase()} ${pathTemplate}`,

@@ -13,6 +13,9 @@ const ExecuteRequest = Schema.Struct({
   // completion instead of pausing. Set by the operator-facing Run/Test panel,
   // where clicking Run is itself the approval. `block` policies still apply.
   autoApprove: Schema.optional(Schema.Boolean),
+  /** `"read"` refuses every tool call that is not positively classified
+   *  read-only, before it runs and irrespective of policy. Default `"write"`. */
+  mode: Schema.optional(Schema.Literals(["read", "write"])),
   /**
    * Set when the caller is a rendered artifact rather than the console's own
    * code surface — the artifact page has no MCP client, so the shell reaches

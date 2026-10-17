@@ -1166,12 +1166,14 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       code: string,
       extra: McpRequestJoinKeys,
       integrations?: readonly string[],
+      mode?: "read" | "write",
     ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
         yield* startMarker("mcp.host.tool.execute.start", {
           "mcp.tool.name": "execute",
           "mcp.execute.code_length": code.length,
         });
+        yield* Effect.annotateCurrentSpan({ "mcp.execute.mode": mode ?? "write" });
         debugLog("execute.call", {
           elicitationMode: elicitationMode.mode,
           elicitationSupport: getElicitationSupport(server),
@@ -1182,10 +1184,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           const result = yield* engine.execute(code, {
             onElicitation: makeMcpElicitationHandler(server, debugLog),
             integrations,
+            mode,
           });
           return toMcpResult(result);
         }
-        const outcome = yield* engine.executeWithPause(code, { integrations });
+        const outcome = yield* engine.executeWithPause(code, { integrations, mode });
         debugLog("execute.paused_flow_result", {
           status: outcome.status,
           executionId: outcome.status === "paused" ? outcome.execution.id : undefined,
@@ -1475,9 +1478,16 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
               .describe(
                 "Confine this run to tools of these integration slugs: any other tool call fails with out_of_scope, and search / describe.tool / executor.integrations.list only see these integrations.",
               ),
+            mode: z
+              .enum(["read", "write"])
+              .optional()
+              .describe(
+                '"read" refuses every tool call that is not classified read-only (fails closed on unknown tools) before it runs; default "write".',
+              ),
           },
         },
-        ({ code, integrations }, extra) => runToolEffect(executeCode(code, extra, integrations)),
+        ({ code, integrations, mode }, extra) =>
+          runToolEffect(executeCode(code, extra, integrations, mode)),
       ),
     ).pipe(
       Effect.withSpan("mcp.host.register_tool", {

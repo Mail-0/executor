@@ -1,8 +1,18 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Data, Effect, Exit, Schema } from "effect";
 
-import { createExecutor, definePlugin } from "@executor-js/sdk";
-import { makeTestConfig } from "@executor-js/sdk/testing";
+import {
+  AuthTemplateSlug,
+  ConnectionName,
+  createExecutor,
+  definePlugin,
+  IntegrationSlug,
+  ProviderItemId,
+  ProviderKey,
+  ToolName,
+  type CredentialProvider,
+} from "@executor-js/sdk";
+import { makeTestConfig, makeTestExecutor } from "@executor-js/sdk/testing";
 import type { CodeExecutor, ExecuteResult } from "@executor-js/codemode-core";
 import { makeQuickJsExecutor } from "@executor-js/runtime-quickjs";
 
@@ -387,6 +397,110 @@ describe("per-execution integration scope", () => {
         alpha: { ok: false, error: { code: "tool_blocked" } },
         beta: { ok: false, error: { code: "out_of_scope" } },
       });
+    }),
+  );
+});
+
+describe("executeWithPause read mode", () => {
+  const VERCEL = IntegrationSlug.make("vercel");
+  const CONN = ConnectionName.make("main");
+  const TEMPLATE = AuthTemplateSlug.make("apiKey");
+
+  const memoryProvider = (): CredentialProvider => {
+    const store = new Map<string, string>();
+    return {
+      key: ProviderKey.make("memory"),
+      writable: true,
+      get: (id) => Effect.sync(() => store.get(String(id)) ?? null),
+      set: (id, value) => Effect.sync(() => void store.set(String(id), value)),
+    };
+  };
+
+  const readModePlugin = definePlugin(() => ({
+    id: "read-mode-test" as const,
+    storage: () => ({}),
+    credentialProviders: [memoryProvider()],
+    resolveTools: () =>
+      Effect.succeed({
+        tools: [
+          { name: ToolName.make("lookup"), description: "look up" },
+          { name: ToolName.make("delete"), description: "delete" },
+        ],
+      }),
+    resolveAnnotations: ({ toolRows }) => {
+      const out: Record<string, { readOnly?: boolean }> = {};
+      for (const row of toolRows) {
+        out[row.name] = { readOnly: row.name.toLowerCase().includes("lookup") };
+      }
+      return Effect.succeed(out);
+    },
+    invokeTool: ({ toolRow }) => Effect.succeed({ ran: `${toolRow.name}` }),
+    extension: (ctx) => ({
+      seed: () =>
+        ctx.core.integrations.register({
+          slug: VERCEL,
+          description: "Vercel",
+          config: {},
+        }),
+    }),
+  }));
+
+  const makeReadModeExecutor = () =>
+    makeTestExecutor({ plugins: [readModePlugin()] as const }).pipe(
+      Effect.tap((executor) =>
+        Effect.gen(function* () {
+          yield* executor["read-mode-test"].seed();
+          yield* executor.connections.create({
+            owner: "org",
+            name: CONN,
+            integration: VERCEL,
+            template: TEMPLATE,
+            from: { provider: ProviderKey.make("memory"), id: ProviderItemId.make("v") },
+          });
+        }),
+      ),
+    );
+
+  const invokeTwo: CodeExecutor<FakeRuntimeError> = {
+    execute: (_code, tools) =>
+      Effect.gen(function* () {
+        const read = yield* tools
+          .invoke({ path: "vercel.org.main.lookup", args: {} })
+          .pipe(Effect.orElseSucceed(() => null));
+        const write = yield* tools
+          .invoke({ path: "vercel.org.main.delete", args: {} })
+          .pipe(Effect.orElseSucceed(() => null));
+        return { result: { read, write }, logs: [] } satisfies ExecuteResult;
+      }),
+  };
+
+  it.effect("refuses a non-read-only tool call on the success channel without pausing", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeReadModeExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: invokeTwo });
+
+      const outcome = yield* engine.executeWithPause("code", { mode: "read" });
+      expect(outcome.status).toBe("completed");
+      if (outcome.status !== "completed") return;
+      const { read, write } = outcome.result.result as { read: unknown; write: unknown };
+      expect(read).toEqual({ ok: true, data: { ran: "lookup" } });
+      expect(JSON.stringify(write)).toContain("read_only_mode");
+
+      expect(yield* engine.pausedExecutionCount()).toBe(0);
+    }),
+  );
+
+  it.effect("runs the read tool to completion in write mode", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeReadModeExecutor();
+      const engine = createExecutionEngine({ executor, codeExecutor: invokeTwo });
+
+      const outcome = yield* engine.executeWithPause("code", { autoApprove: true });
+      expect(outcome.status).toBe("completed");
+      if (outcome.status !== "completed") return;
+      const { read, write } = outcome.result.result as { read: unknown; write: unknown };
+      expect(read).toEqual({ ok: true, data: { ran: "lookup" } });
+      expect(write).toEqual({ ok: true, data: { ran: "delete" } });
     }),
   );
 });

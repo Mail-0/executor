@@ -12,6 +12,9 @@ export interface ToolAnnotations {
   readonly requiresApproval?: boolean;
   readonly approvalDescription?: string;
   readonly mayElicit?: boolean;
+  /** True when the call has no side effects. Absent/false is treated as a
+   *  write by read-mode execution. */
+  readonly readOnly?: boolean;
 }
 
 /** A tool as produced by a plugin — the definition, no address yet (the SDK

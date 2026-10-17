@@ -265,6 +265,7 @@ export const migrateV1ToolAnnotations = (
   return {
     ...base,
     requiresApproval: base.requiresApproval ?? destructive,
+    readOnly: base.readOnly ?? binding.annotations?.readOnlyHint === true,
     ...(destructive && base.approvalDescription === undefined
       ? { approvalDescription: binding.annotations?.title ?? binding.toolName }
       : {}),

@@ -201,6 +201,7 @@ describe("plugin runtime metadata migration", () => {
 
     expect(annotations).toEqual({
       requiresApproval: false,
+      readOnly: true,
       mcp: {
         toolName: "queryDataset",
         upstream: { title: "Query dataset", readOnlyHint: true },
