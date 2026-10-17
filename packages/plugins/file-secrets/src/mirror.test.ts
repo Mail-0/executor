@@ -158,3 +158,38 @@ describe("file secrets durable mirror", () => {
     expect(mirror.requests).toEqual([]);
   });
 });
+
+describe("file secrets mirror token file", () => {
+  let dir: string;
+  let mirror: MirrorServer;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), "executor-file-secrets-token-"));
+    mirror = await startMirror();
+  });
+
+  afterEach(async () => {
+    await mirror.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("re-reads the token file for every request so the host can rotate it", async () => {
+    const tokenFile = join(dir, "mirror-token");
+    writeFileSync(tokenFile, `${TOKEN}\n`);
+    const options: FileSecretsPluginConfig = {
+      directory: join(dir, "data"),
+      mirror: { url: mirror.url, token: "", tokenFile },
+    };
+
+    await run(options, (provider) =>
+      Effect.gen(function* () {
+        yield* provider.set!(id("conn:refresh"), "rt-1");
+        writeFileSync(tokenFile, "rotated-elsewhere");
+        yield* provider.set!(id("conn:refresh"), "rt-2");
+      }),
+    );
+
+    expect(mirror.items.get("conn:refresh")).toBe("rt-1");
+    expect(mirror.requests.filter((r) => r.startsWith("PUT")).length).toBeGreaterThanOrEqual(2);
+  });
+});

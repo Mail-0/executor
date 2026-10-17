@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { Effect, Layer, Predicate, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 
@@ -15,24 +16,49 @@ import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 //   PUT    {url}/items/{id}   <- { "value": "<value>" }
 //   DELETE {url}/items/{id}
 //
-// Every request carries `Authorization: Bearer <token>`.
+// Every request carries `Authorization: Bearer <token>`. With a token file the
+// file is re-read for every request, so the host can rotate a short-lived token
+// without restarting the process.
 // ---------------------------------------------------------------------------
 
 export interface SecretsMirrorConfig {
   readonly url: string;
   readonly token: string;
+  /** Read the bearer token from this file on every request (falls back to `token`). */
+  readonly tokenFile?: string;
 }
 
-/** `null` disables the mirror; `undefined` reads EXECUTOR_SECRETS_MIRROR_URL/_TOKEN. */
+// Like the file key, the token leaves the environment once read so nothing
+// the process spawns inherits a credential for the mirror.
+const environmentToken: { taken: boolean; value: string | undefined } = {
+  taken: false,
+  value: undefined,
+};
+
+const takeEnvironmentToken = (): string | undefined => {
+  if (!environmentToken.taken) {
+    environmentToken.value = process.env.EXECUTOR_SECRETS_MIRROR_TOKEN;
+    environmentToken.taken = true;
+    delete process.env.EXECUTOR_SECRETS_MIRROR_TOKEN;
+  }
+  return environmentToken.value;
+};
+
+/** `null` disables the mirror; `undefined` reads EXECUTOR_SECRETS_MIRROR_URL/_TOKEN/_TOKEN_FILE. */
 export const resolveSecretsMirror = (
   configured: SecretsMirrorConfig | null | undefined,
 ): SecretsMirrorConfig | null => {
   const url = configured === undefined ? process.env.EXECUTOR_SECRETS_MIRROR_URL : configured?.url;
-  const token =
-    configured === undefined ? process.env.EXECUTOR_SECRETS_MIRROR_TOKEN : configured?.token;
+  const token = configured === undefined ? takeEnvironmentToken() : configured?.token;
+  const tokenFile = (
+    configured === undefined
+      ? process.env.EXECUTOR_SECRETS_MIRROR_TOKEN_FILE
+      : configured?.tokenFile
+  )?.trim();
   const trimmedUrl = url?.trim().replace(/\/+$/, "");
-  const trimmedToken = token?.trim();
-  return trimmedUrl && trimmedToken ? { url: trimmedUrl, token: trimmedToken } : null;
+  const trimmedToken = token?.trim() ?? "";
+  if (!trimmedUrl || (!trimmedToken && !tokenFile)) return null;
+  return { url: trimmedUrl, token: trimmedToken, ...(tokenFile ? { tokenFile } : {}) };
 };
 
 export class SecretsMirrorError extends Schema.TaggedErrorClass<SecretsMirrorError>()(
@@ -63,15 +89,28 @@ export const makeSecretsMirrorClient = (
   config: SecretsMirrorConfig,
   httpClientLayer: Layer.Layer<HttpClient.HttpClient>,
 ) => {
+  const { tokenFile } = config;
+  const currentToken: Effect.Effect<string> =
+    tokenFile === undefined
+      ? Effect.succeed(config.token)
+      : Effect.try({
+          try: () => fs.readFileSync(tokenFile, "utf-8").trim(),
+          catch: () => new SecretsMirrorError({ operation: "read token file", status: null }),
+        }).pipe(
+          Effect.match({
+            onFailure: () => config.token,
+            onSuccess: (token) => token || config.token,
+          }),
+        );
+
   const send = (operation: string, request: HttpClientRequest.HttpClientRequest) =>
     Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient;
-      const response = yield* client
-        .execute(HttpClientRequest.bearerToken(request, config.token))
-        .pipe(
-          Effect.timeout(REQUEST_TIMEOUT),
-          Effect.mapError(() => new SecretsMirrorError({ operation, status: null })),
-        );
+      const token = yield* currentToken;
+      const response = yield* client.execute(HttpClientRequest.bearerToken(request, token)).pipe(
+        Effect.timeout(REQUEST_TIMEOUT),
+        Effect.mapError(() => new SecretsMirrorError({ operation, status: null })),
+      );
       if (response.status < 200 || response.status >= 300) {
         return yield* new SecretsMirrorError({ operation, status: response.status });
       }
