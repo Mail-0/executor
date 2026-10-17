@@ -36,7 +36,11 @@ export default defineExecutorConfig({
         presets: [...googleCatalog, ...microsoftCatalog],
         specFormats: [googleDiscoveryAdapter, microsoftGraphAdapter],
       }),
-      mcpHttpPlugin({ dangerouslyAllowStdioMCP: true }),
+      // Hosts that run untrusted sources (sandboxed daemons) opt out with
+      // EXECUTOR_ALLOW_STDIO_MCP=false; desktop and CLI keep stdio by default.
+      mcpHttpPlugin({
+        dangerouslyAllowStdioMCP: process.env.EXECUTOR_ALLOW_STDIO_MCP !== "false",
+      }),
       graphqlHttpPlugin(),
       toolkitsPlugin({ activeToolkitSlug }),
       // The durable file store must register before keychain: the first
