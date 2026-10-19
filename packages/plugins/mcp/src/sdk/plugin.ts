@@ -551,17 +551,22 @@ const selectAuthMethod = (
   return methods.length === 1 ? methods[0] : undefined;
 };
 
+const HEADER_CONTEXT_PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+const UNRESOLVED_HEADER_CONTEXT_PLACEHOLDER = /\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/;
+
 const renderHeaderContextValue = (
   value: string,
   headerContext?: Readonly<Record<string, string>>,
-): string =>
-  headerContext
-    ? value.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (placeholder, name: string) => {
+): string | undefined => {
+  const rendered = headerContext
+    ? value.replace(HEADER_CONTEXT_PLACEHOLDER, (placeholder, name: string) => {
         if (!Object.hasOwn(headerContext, name)) return placeholder;
         const replacement = headerContext[name];
         return replacement === undefined ? placeholder : replacement.replace(/[\r\n]/g, " ");
       })
     : value;
+  return UNRESOLVED_HEADER_CONTEXT_PLACEHOLDER.test(rendered) ? undefined : rendered;
+};
 
 const buildConnectorInput = (
   config: McpIntegrationConfigType,
@@ -604,12 +609,11 @@ const buildConnectorInput = (
 
   // Credential placements render OVER the integration's static headers /
   // query params — a same-named static entry is overwritten.
-  const headers: Record<string, string> = Object.fromEntries(
-    Object.entries(config.headers ?? {}).map(([name, value]) => [
-      name,
-      renderHeaderContextValue(value, headerContext),
-    ]),
-  );
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(config.headers ?? {})) {
+    const rendered = renderHeaderContextValue(value, headerContext);
+    if (rendered !== undefined) headers[name] = rendered;
+  }
   const queryParams: Record<string, string> = { ...(config.queryParams ?? {}) };
   let authProvider: OAuthClientProvider | undefined;
 

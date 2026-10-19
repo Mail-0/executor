@@ -17,10 +17,12 @@ import { makeEchoMcpServer, serveMcpServer, type McpTestRequest } from "../testi
 const SLUG = "header_context";
 const TEMPLATE = "header_token";
 
-const seedHeaderContextExecutor = () =>
+const seedHeaderContextExecutor = (rejectUnresolvedHeaderPlaceholders = false) =>
   Effect.acquireRelease(
     Effect.gen(function* () {
-      const server = yield* serveMcpServer(() => makeEchoMcpServer());
+      const server = yield* serveMcpServer(() => makeEchoMcpServer(), {
+        rejectUnresolvedHeaderPlaceholders,
+      });
       const config = makeTestConfig({
         plugins: [memoryCredentialsPlugin(), mcpPlugin()] as const,
       });
@@ -97,7 +99,7 @@ describe("MCP static header context", () => {
         const renderedRequest = lastPost(yield* server.requests);
         expect(renderedRequest?.headers["x-user"]).toBe("Bearer Ada  X-Evil: yes");
         expect(renderedRequest?.headers["x-mixed"]).toBe("before Ada  X-Evil: yes after");
-        expect(renderedRequest?.headers["x-unknown"]).toBe("unknown={{missing}}");
+        expect(renderedRequest?.headers["x-unknown"]).toBeUndefined();
         expect(renderedRequest?.headers.authorization).toBe("Bearer api-key-token");
         expect(renderedRequest?.headers["x-evil"]).toBeUndefined();
         expect(server.sessionCount()).toBe(sessionsBeforeInvokes + 1);
@@ -110,8 +112,32 @@ describe("MCP static header context", () => {
 
         yield* invoke();
         const unrenderedRequest = lastPost(yield* server.requests);
-        expect(unrenderedRequest?.headers["x-user"]).toBe("Bearer {{identity}}");
-        expect(unrenderedRequest?.headers["x-mixed"]).toBe("before {{ identity }} after");
+        expect(unrenderedRequest?.headers["x-user"]).toBeUndefined();
+        expect(unrenderedRequest?.headers["x-mixed"]).toBeUndefined();
+      }),
+    ),
+  );
+
+  it.effect("omits unresolved placeholders during discovery and renders them for invocation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor, server, address } = yield* seedHeaderContextExecutor(true);
+        expect(server.sessionCount(), "discovery completed against the rejecting upstream").toBe(1);
+
+        yield* executor.execute(
+          address,
+          { value: "hello" },
+          {
+            onElicitation: "accept-all",
+            headerContext: { identity: "Ada" },
+          },
+        );
+
+        const requests = yield* server.requests;
+        expect(
+          requests.some((request) => request.headers["x-user"] === "Bearer Ada"),
+          "the invocation carries the rendered header",
+        ).toBe(true);
       }),
     ),
   );
