@@ -1,8 +1,15 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Data, Effect, Exit, Schema } from "effect";
 
-import { createExecutor, definePlugin } from "@executor-js/sdk";
-import { makeTestConfig } from "@executor-js/sdk/testing";
+import {
+  AuthTemplateSlug,
+  ConnectionName,
+  IntegrationSlug,
+  ToolName,
+  createExecutor,
+  definePlugin,
+} from "@executor-js/sdk";
+import { makeTestConfig, memoryCredentialsPlugin } from "@executor-js/sdk/testing";
 import type { CodeExecutor, ExecuteResult } from "@executor-js/codemode-core";
 import { makeQuickJsExecutor } from "@executor-js/runtime-quickjs";
 
@@ -75,9 +82,131 @@ const scopedPlugin = definePlugin(() => ({
   ],
 }));
 
+const HEADER_CONTEXT_INTEGRATION = IntegrationSlug.make("header_context");
+
+const headerContextPlugin = (received: (Readonly<Record<string, string>> | undefined)[]) =>
+  definePlugin(() => ({
+    id: "header-context-test" as const,
+    storage: () => ({}),
+    resolveTools: () =>
+      Effect.succeed({
+        tools: [
+          { name: ToolName.make("read"), description: "Read header context" },
+          {
+            name: ToolName.make("approve"),
+            description: "Approval-gated read",
+            annotations: { requiresApproval: true },
+          },
+        ],
+      }),
+    invokeTool: ({ invokeOptions }) =>
+      Effect.sync(() => {
+        received.push(invokeOptions?.headerContext);
+        return { ok: true };
+      }),
+    extension: (ctx) => ({
+      seed: () =>
+        ctx.core.integrations.register({
+          slug: HEADER_CONTEXT_INTEGRATION,
+          description: "Header context fixture",
+          config: {},
+        }),
+    }),
+  }));
+
+const makeHeaderContextExecutor = (received: (Readonly<Record<string, string>> | undefined)[]) =>
+  createExecutor(
+    makeTestConfig({
+      plugins: [memoryCredentialsPlugin(), headerContextPlugin(received)()] as const,
+    }),
+  ).pipe(
+    Effect.tap((executor) =>
+      Effect.gen(function* () {
+        yield* executor["header-context-test"].seed();
+        yield* executor.connections.create({
+          owner: "org",
+          name: ConnectionName.make("main"),
+          integration: HEADER_CONTEXT_INTEGRATION,
+          template: AuthTemplateSlug.make("none"),
+          value: "",
+        });
+      }),
+    ),
+  );
+
+const headerContextCallingRuntime: CodeExecutor<FakeRuntimeError> = {
+  execute: (_code, tools) =>
+    Effect.gen(function* () {
+      const result = yield* tools
+        .invoke({
+          path: "tools.header_context.org.main.read",
+          args: {},
+        })
+        .pipe(Effect.mapError(() => new FakeRuntimeError({ message: "Tool invocation failed" })));
+      return { result, logs: [] } satisfies ExecuteResult;
+    }),
+};
+
 const makeExecutor = () => createExecutor(makeTestConfig({ plugins: [emptyPlugin()] as const }));
 const makeScopedExecutor = () =>
   createExecutor(makeTestConfig({ plugins: [scopedPlugin()] as const }));
+
+describe("per-call header context", () => {
+  it.effect("forwards the context to plugin invocations from execute", () =>
+    Effect.gen(function* () {
+      const received: (Readonly<Record<string, string>> | undefined)[] = [];
+      const executor = yield* makeHeaderContextExecutor(received);
+      const engine = createExecutionEngine({
+        executor,
+        codeExecutor: headerContextCallingRuntime,
+      });
+      const headerContext = { identity: "+14155550123" };
+
+      yield* engine.execute("invoke", {
+        onElicitation: () => Effect.succeed({ action: "accept" }),
+        headerContext,
+      });
+
+      expect(received).toEqual([headerContext]);
+    }),
+  );
+
+  it.effect("preserves the context when a paused execution resumes", () =>
+    Effect.gen(function* () {
+      const received: (Readonly<Record<string, string>> | undefined)[] = [];
+      const executor = yield* makeHeaderContextExecutor(received);
+      const codeExecutor: CodeExecutor<FakeRuntimeError> = {
+        execute: (_code, tools) =>
+          Effect.gen(function* () {
+            yield* tools
+              .invoke({ path: "tools.header_context.org.main.approve", args: {} })
+              .pipe(
+                Effect.mapError(() => new FakeRuntimeError({ message: "Tool invocation failed" })),
+              );
+            const result = yield* tools
+              .invoke({
+                path: "tools.header_context.org.main.read",
+                args: {},
+              })
+              .pipe(
+                Effect.mapError(() => new FakeRuntimeError({ message: "Tool invocation failed" })),
+              );
+            return { result, logs: [] } satisfies ExecuteResult;
+          }),
+      };
+      const engine = createExecutionEngine({ executor, codeExecutor });
+      const headerContext = { identity: "resumed-user" };
+
+      const paused = yield* engine.executeWithPause("pause", { headerContext });
+      expect(paused.status).toBe("paused");
+      if (paused.status !== "paused") return;
+
+      const resumed = yield* engine.resume(paused.execution.id, { action: "accept" });
+      expect(resumed?.status).toBe("completed");
+      expect(received).toEqual([headerContext, headerContext]);
+    }),
+  );
+});
 
 describe("executeWithPause failure propagation", () => {
   it.effect("surfaces a fast codeExecutor failure as an Exit.Failure", () =>

@@ -23,6 +23,7 @@ export type McpTestRequest = {
   readonly url: string;
   readonly authorization: string | undefined;
   readonly sessionId: string | undefined;
+  readonly headers: Readonly<Record<string, string | string[] | undefined>>;
 };
 
 export type McpTestServerOptions = {
@@ -97,6 +98,7 @@ export const serveMcpServer = (factory: () => McpServer, options: McpTestServerO
               url: requestUrl,
               authorization,
               sessionId,
+              headers: { ...request.headers },
             },
           ]);
 

@@ -551,12 +551,25 @@ const selectAuthMethod = (
   return methods.length === 1 ? methods[0] : undefined;
 };
 
+const renderHeaderContextValue = (
+  value: string,
+  headerContext?: Readonly<Record<string, string>>,
+): string =>
+  headerContext
+    ? value.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (placeholder, name: string) => {
+        if (!Object.hasOwn(headerContext, name)) return placeholder;
+        const replacement = headerContext[name];
+        return replacement === undefined ? placeholder : replacement.replace(/[\r\n]/g, " ");
+      })
+    : value;
+
 const buildConnectorInput = (
   config: McpIntegrationConfigType,
   values: Record<string, string | null>,
   templateSlug: string | null,
   allowStdio: boolean,
   httpClientLayer?: Layer.Layer<HttpClient.HttpClient>,
+  headerContext?: Readonly<Record<string, string>>,
 ): Effect.Effect<ConnectorInput, McpConnectionError> => {
   if (config.transport === "stdio") {
     if (!allowStdio) {
@@ -591,7 +604,12 @@ const buildConnectorInput = (
 
   // Credential placements render OVER the integration's static headers /
   // query params — a same-named static entry is overwritten.
-  const headers: Record<string, string> = { ...(config.headers ?? {}) };
+  const headers: Record<string, string> = Object.fromEntries(
+    Object.entries(config.headers ?? {}).map(([name, value]) => [
+      name,
+      renderHeaderContextValue(value, headerContext),
+    ]),
+  );
   const queryParams: Record<string, string> = { ...(config.queryParams ?? {}) };
   let authProvider: OAuthClientProvider | undefined;
 
@@ -1256,7 +1274,7 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
         StorageFailure
       >,
 
-    invokeTool: ({ ctx, toolRow, credential, args, elicit }) =>
+    invokeTool: ({ ctx, toolRow, credential, args, elicit, invokeOptions }) =>
       Effect.gen(function* () {
         const parsed = parseMcpIntegrationConfig(credential.config);
         if (!parsed) {
@@ -1302,6 +1320,7 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
           String(credential.template),
           allowStdio,
           options?.httpClientLayer ?? ctx.httpClientLayer,
+          invokeOptions?.headerContext,
         );
         const connector: McpConnector = createMcpConnector(connectorInput);
         const poolKey =
