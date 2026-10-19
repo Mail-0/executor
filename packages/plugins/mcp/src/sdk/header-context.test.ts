@@ -34,7 +34,7 @@ const seedHeaderContextExecutor = (rejectUnresolvedHeaderPlaceholders = false) =
         slug: SLUG,
         remoteTransport: "streamable-http",
         headers: {
-          "X-User": "Bearer {{identity}}",
+          "X-User": "{{identity}}",
           "X-Mixed": "before {{ identity }} after",
           "X-Unknown": "unknown={{missing}}",
           Authorization: "Static {{identity}}",
@@ -97,7 +97,7 @@ describe("MCP static header context", () => {
 
         yield* invoke(context);
         const renderedRequest = lastPost(yield* server.requests);
-        expect(renderedRequest?.headers["x-user"]).toBe("Bearer Ada  X-Evil: yes");
+        expect(renderedRequest?.headers["x-user"]).toBe("Ada  X-Evil: yes");
         expect(renderedRequest?.headers["x-mixed"]).toBe("before Ada  X-Evil: yes after");
         expect(renderedRequest?.headers["x-unknown"]).toBeUndefined();
         expect(renderedRequest?.headers.authorization).toBe("Bearer api-key-token");
@@ -114,6 +114,26 @@ describe("MCP static header context", () => {
         const unrenderedRequest = lastPost(yield* server.requests);
         expect(unrenderedRequest?.headers["x-user"]).toBeUndefined();
         expect(unrenderedRequest?.headers["x-mixed"]).toBeUndefined();
+      }),
+    ),
+  );
+
+  it.effect("preserves placeholder-looking context values", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { executor, server, address } = yield* seedHeaderContextExecutor();
+
+        yield* executor.execute(
+          address,
+          { value: "hello" },
+          {
+            onElicitation: "accept-all",
+            headerContext: { identity: "customer{{east}}" },
+          },
+        );
+
+        const request = lastPost(yield* server.requests);
+        expect(request?.headers["x-user"]).toBe("customer{{east}}");
       }),
     ),
   );
@@ -135,7 +155,7 @@ describe("MCP static header context", () => {
 
         const requests = yield* server.requests;
         expect(
-          requests.some((request) => request.headers["x-user"] === "Bearer Ada"),
+          requests.some((request) => request.headers["x-user"] === "Ada"),
           "the invocation carries the rendered header",
         ).toBe(true);
       }),

@@ -29,17 +29,17 @@ scenario(
       const slug = freshSlug();
       const server = yield* serveMcpServer(() => makeEchoMcpServer());
 
-      yield* client.mcp.addServer({
-        payload: {
-          transport: "remote",
-          name: "Header-context MCP",
-          endpoint: server.endpoint,
-          slug,
-          headers: { "X-User": "{{identity}}" },
-        },
-      });
-
       yield* Effect.gen(function* () {
+        yield* client.mcp.addServer({
+          payload: {
+            transport: "remote",
+            name: "Header-context MCP",
+            endpoint: server.endpoint,
+            slug,
+            headers: { "X-User": "{{identity}}" },
+          },
+        });
+
         yield* client.connections.create({
           payload: {
             owner: "org",

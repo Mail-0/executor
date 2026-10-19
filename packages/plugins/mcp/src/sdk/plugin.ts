@@ -552,20 +552,24 @@ const selectAuthMethod = (
 };
 
 const HEADER_CONTEXT_PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
-const UNRESOLVED_HEADER_CONTEXT_PLACEHOLDER = /\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/;
 
 const renderHeaderContextValue = (
   value: string,
   headerContext?: Readonly<Record<string, string>>,
 ): string | undefined => {
-  const rendered = headerContext
-    ? value.replace(HEADER_CONTEXT_PLACEHOLDER, (placeholder, name: string) => {
-        if (!Object.hasOwn(headerContext, name)) return placeholder;
-        const replacement = headerContext[name];
-        return replacement === undefined ? placeholder : replacement.replace(/[\r\n]/g, " ");
-      })
-    : value;
-  return UNRESOLVED_HEADER_CONTEXT_PLACEHOLDER.test(rendered) ? undefined : rendered;
+  let missing = false;
+  const rendered = value.replace(HEADER_CONTEXT_PLACEHOLDER, (placeholder, name: string) => {
+    if (
+      !headerContext ||
+      !Object.hasOwn(headerContext, name) ||
+      headerContext[name] === undefined
+    ) {
+      missing = true;
+      return placeholder;
+    }
+    return headerContext[name].replace(/[\r\n]/g, " ");
+  });
+  return missing ? undefined : rendered;
 };
 
 const buildConnectorInput = (
