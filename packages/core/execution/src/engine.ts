@@ -524,6 +524,7 @@ export type ExecutionEngine<E extends Cause.YieldableError = CodeExecutionError>
     options: {
       readonly onElicitation: ElicitationHandler;
       readonly integrations?: readonly string[];
+      readonly headerContext?: Readonly<Record<string, string>>;
     },
   ) => Effect.Effect<ExecuteResult, E>;
 
@@ -540,7 +541,11 @@ export type ExecutionEngine<E extends Cause.YieldableError = CodeExecutionError>
    */
   readonly executeWithPause: (
     code: string,
-    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
+    options?: {
+      readonly autoApprove?: boolean;
+      readonly integrations?: readonly string[];
+      readonly headerContext?: Readonly<Record<string, string>>;
+    },
   ) => Effect.Effect<ExecutionResult, E>;
 
   /**
@@ -647,7 +652,11 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
    */
   const startPausableExecution = Effect.fn("mcp.execute")(function* (
     code: string,
-    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
+    options?: {
+      readonly autoApprove?: boolean;
+      readonly integrations?: readonly string[];
+      readonly headerContext?: Readonly<Record<string, string>>;
+    },
   ) {
     yield* Effect.annotateCurrentSpan({
       "mcp.execute.mode": "pausable",
@@ -662,6 +671,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
       const result = yield* runInlineExecution(code, {
         onElicitation: acceptAllHandler,
         integrations: options.integrations,
+        headerContext: options.headerContext,
       });
       return { status: "completed", result } satisfies ExecutionResult;
     }
@@ -699,7 +709,11 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
 
     const invoker = makeFullInvoker(
       executor,
-      { onElicitation: elicitationHandler, integrations: options?.integrations },
+      {
+        onElicitation: elicitationHandler,
+        integrations: options?.integrations,
+        headerContext: options?.headerContext,
+      },
       toolDiscoveryProvider,
     );
     fiber = yield* Effect.forkDetach(executeRecorded(codeExecutor, code, invoker));
@@ -792,6 +806,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
     options: {
       readonly onElicitation: ElicitationHandler;
       readonly integrations?: readonly string[];
+      readonly headerContext?: Readonly<Record<string, string>>;
     },
   ) {
     yield* Effect.annotateCurrentSpan({
@@ -803,6 +818,7 @@ export const createExecutionEngine = <E extends Cause.YieldableError = CodeExecu
       {
         onElicitation: options.onElicitation,
         integrations: options.integrations,
+        headerContext: options.headerContext,
       },
       toolDiscoveryProvider,
     );

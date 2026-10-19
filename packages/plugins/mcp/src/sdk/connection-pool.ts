@@ -4,6 +4,7 @@ import type { McpConnection, McpConnector } from "./connection";
 import type { McpInvocationError } from "./errors";
 
 const IDLE_TTL_MS = 5 * 60 * 1_000;
+const MAX_IDLE_CONNECTIONS = 64;
 
 type IdleConnection = {
   readonly connection: McpConnection;
@@ -92,17 +93,32 @@ export const createMcpConnectionPool = (): McpConnectionPool => {
 
   const release = <A, E>(key: string, lease: ConnectionLease, exit: Exit.Exit<A, E>) =>
     Effect.gen(function* () {
-      if (shouldDropConnection(exit)) {
-        yield* closeQuietly(lease.connection);
-        return;
-      }
+      const toClose = yield* Effect.sync(() => {
+        const now = Date.now();
+        const expired = [...idle.entries()].filter(
+          ([, entry]) => now - entry.idleSince >= IDLE_TTL_MS,
+        );
+        for (const [expiredKey] of expired) idle.delete(expiredKey);
+        const toClose = expired.map(([, entry]) => entry.connection);
 
-      const displaced = yield* Effect.sync(() => {
-        if (idle.has(key)) return lease.connection;
-        idle.set(key, { connection: lease.connection, idleSince: Date.now() });
-        return undefined;
+        if (shouldDropConnection(exit) || idle.has(key)) {
+          toClose.push(lease.connection);
+          return toClose;
+        }
+
+        idle.set(key, { connection: lease.connection, idleSince: now });
+        const excess = Math.max(0, idle.size - MAX_IDLE_CONNECTIONS);
+        const oldest = [...idle.entries()]
+          .sort(([, left], [, right]) => left.idleSince - right.idleSince)
+          .slice(0, excess);
+        for (const [oldestKey] of oldest) idle.delete(oldestKey);
+        toClose.push(...oldest.map(([, entry]) => entry.connection));
+        return toClose;
       });
-      if (displaced) yield* closeQuietly(displaced);
+      yield* Effect.forEach(toClose, closeQuietly, {
+        concurrency: "unbounded",
+        discard: true,
+      });
     });
 
   const withConnection: McpConnectionPool["withConnection"] = (key, connector, use) => {

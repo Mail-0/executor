@@ -55,6 +55,8 @@ export interface InvokeOptions {
   readonly onElicitation?: OnElicitation;
   /** Confines the call to tools whose integration slug (first address segment) is listed; anything else fails before policy/approval. */
   readonly integrations?: readonly string[];
+  /** Per-call values for `{{name}}` placeholders in an integration's static headers, supplied by the host and never by executed code. */
+  readonly headerContext?: Readonly<Record<string, string>>;
 }
 
 /** A tool was declined or cancelled during elicitation. */

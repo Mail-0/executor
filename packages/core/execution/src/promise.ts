@@ -42,11 +42,16 @@ export type ExecutionEngine = {
     options: {
       readonly onElicitation: ElicitationHandler;
       readonly integrations?: readonly string[];
+      readonly headerContext?: Readonly<Record<string, string>>;
     },
   ) => Promise<ExecuteResult>;
   readonly executeWithPause: (
     code: string,
-    options?: { readonly autoApprove?: boolean; readonly integrations?: readonly string[] },
+    options?: {
+      readonly autoApprove?: boolean;
+      readonly integrations?: readonly string[];
+      readonly headerContext?: Readonly<Record<string, string>>;
+    },
   ) => Promise<ExecutionResult>;
   readonly resume: (
     executionId: string,
@@ -156,6 +161,7 @@ export const toPromiseExecutionEngine = <E extends Cause.YieldableError>(
           // oxlint-disable-next-line executor/no-effect-escape-hatch -- boundary: host-provided Promise elicitation callback is outside the Effect error model
           Effect.tryPromise(() => options.onElicitation(ctx)).pipe(Effect.orDie),
         integrations: options.integrations,
+        headerContext: options.headerContext,
       }),
     ),
   executeWithPause: (code, options) => Effect.runPromise(engine.executeWithPause(code, options)),

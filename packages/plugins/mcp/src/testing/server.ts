@@ -23,10 +23,12 @@ export type McpTestRequest = {
   readonly url: string;
   readonly authorization: string | undefined;
   readonly sessionId: string | undefined;
+  readonly headers: Readonly<Record<string, string | string[] | undefined>>;
 };
 
 export type McpTestServerOptions = {
   readonly path?: string;
+  readonly rejectUnresolvedHeaderPlaceholders?: boolean;
   readonly auth?: {
     readonly validateAuthorization: (authorization: string | undefined) => Effect.Effect<boolean>;
     readonly authorizationServerUrls?: readonly string[];
@@ -97,8 +99,21 @@ export const serveMcpServer = (factory: () => McpServer, options: McpTestServerO
               url: requestUrl,
               authorization,
               sessionId,
+              headers: { ...request.headers },
             },
           ]);
+
+          if (
+            options.rejectUnresolvedHeaderPlaceholders &&
+            Object.values(request.headers).some((value) =>
+              (Array.isArray(value) ? value : [value]).some(
+                (header) => typeof header === "string" && header.includes("{{"),
+              ),
+            )
+          ) {
+            writeText(response, 400, "Unresolved header placeholder");
+            return;
+          }
 
           if (
             options.auth?.authorizationServerUrls &&

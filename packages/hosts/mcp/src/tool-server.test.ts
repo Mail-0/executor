@@ -1845,6 +1845,95 @@ describe("MCP host server — multiple elicitations", () => {
 });
 
 // ---------------------------------------------------------------------------
+// per-call header context
+// ---------------------------------------------------------------------------
+
+describe("MCP host server — per-call header context", () => {
+  it("parses metadata for execute and leaves omitted metadata undefined", async () => {
+    const received: (Readonly<Record<string, string>> | undefined)[] = [];
+    const engine = makeStubEngine({
+      execute: (_code, options) => {
+        received.push(options.headerContext);
+        return Effect.succeed({ result: "ok" });
+      },
+    });
+
+    await withNativeClient(engine, ELICITATION_CAPS, async (client) => {
+      await client.callTool({
+        name: "execute",
+        arguments: { code: "with context" },
+        _meta: { "executor/header-context": { identity: "+14155550123" } },
+      });
+      await client.callTool({
+        name: "execute",
+        arguments: { code: "without context" },
+      });
+    });
+
+    expect(received).toEqual([{ identity: "+14155550123" }, undefined]);
+  });
+
+  it("rejects invalid context entries with clear tool errors", async () => {
+    let executeCount = 0;
+    const engine = makeStubEngine({
+      execute: () => {
+        executeCount += 1;
+        return Effect.succeed({ result: "ok" });
+      },
+    });
+    const tooManyEntries = Object.fromEntries(
+      Array.from({ length: 17 }, (_, index) => [`key_${index}`, "value"]),
+    );
+    const invalidContexts = [
+      {
+        value: { identity: 123 },
+        message: 'Invalid header context value for "identity": expected a string.',
+      },
+      {
+        value: { "bad-key": "value" },
+        message:
+          'Invalid header context key "bad-key": names must match /^[A-Za-z_][A-Za-z0-9_]*$/.',
+      },
+      {
+        value: tooManyEntries,
+        message: "Invalid header context: at most 16 entries are allowed.",
+      },
+      {
+        value: { identity: "x".repeat(1025) },
+        message: 'Invalid header context value for "identity": maximum length is 1024 characters.',
+      },
+      {
+        value: null,
+        message: "Invalid header context: expected a plain object.",
+      },
+    ];
+
+    await withNativeClient(engine, ELICITATION_CAPS, async (client) => {
+      for (const { value, message } of invalidContexts) {
+        const result = await client.callTool({
+          name: "execute",
+          arguments: { code: "invalid context" },
+          _meta: { "executor/header-context": value },
+        });
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain(message);
+      }
+    });
+
+    expect(executeCount).toBe(0);
+  });
+
+  it("advertises header-context support on execute", async () => {
+    await withNativeClient(makeStubEngine({}), ELICITATION_CAPS, async (client) => {
+      const { tools } = await client.listTools();
+      expect(tools.find((tool) => tool.name === "execute")?._meta).toEqual({
+        "executor/header-context": { version: 1 },
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // skills tool
 // ---------------------------------------------------------------------------
 

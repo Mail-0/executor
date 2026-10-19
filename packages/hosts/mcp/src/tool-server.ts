@@ -821,6 +821,70 @@ type McpRequestJoinKeys = {
   readonly sessionId?: string | undefined;
 };
 
+const HEADER_CONTEXT_META_KEY = "executor/header-context";
+const HEADER_CONTEXT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+type HeaderContextParseResult =
+  | {
+      readonly ok: true;
+      readonly headerContext?: Readonly<Record<string, string>>;
+    }
+  | { readonly ok: false; readonly message: string };
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+};
+
+const parseHeaderContext = (metadata: unknown): HeaderContextParseResult => {
+  if (!isPlainObject(metadata) || !Object.hasOwn(metadata, HEADER_CONTEXT_META_KEY)) {
+    return { ok: true };
+  }
+
+  const value = metadata[HEADER_CONTEXT_META_KEY];
+  if (!isPlainObject(value)) {
+    return { ok: false, message: "Invalid header context: expected a plain object." };
+  }
+
+  const entries = Object.entries(value);
+  if (entries.length > 16) {
+    return { ok: false, message: "Invalid header context: at most 16 entries are allowed." };
+  }
+
+  for (const [name, entryValue] of entries) {
+    if (!HEADER_CONTEXT_KEY_PATTERN.test(name)) {
+      return {
+        ok: false,
+        message: `Invalid header context key "${name}": names must match /^[A-Za-z_][A-Za-z0-9_]*$/.`,
+      };
+    }
+    if (typeof entryValue !== "string") {
+      return {
+        ok: false,
+        message: `Invalid header context value for "${name}": expected a string.`,
+      };
+    }
+    if (entryValue.length > 1024) {
+      return {
+        ok: false,
+        message: `Invalid header context value for "${name}": maximum length is 1024 characters.`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    headerContext: Object.fromEntries(entries) as Record<string, string>,
+  };
+};
+
+const headerContextErrorResult = (message: string): McpToolResult => ({
+  content: [{ type: "text", text: message }],
+  structuredContent: { status: "error", error: message },
+  isError: true,
+});
+
 // `mcp.request.session_id` is emitted unconditionally (empty string when the
 // transport carries none) to match the worker-side `annotateMcpRequest`
 // producer: JSON-RPC ids are small per-session integers, so a row without the
@@ -1166,6 +1230,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
       code: string,
       extra: McpRequestJoinKeys,
       integrations?: readonly string[],
+      headerContext?: Readonly<Record<string, string>>,
     ): Effect.Effect<McpToolResult, E> =>
       Effect.gen(function* () {
         yield* startMarker("mcp.host.tool.execute.start", {
@@ -1182,10 +1247,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
           const result = yield* engine.execute(code, {
             onElicitation: makeMcpElicitationHandler(server, debugLog),
             integrations,
+            headerContext,
           });
           return toMcpResult(result);
         }
-        const outcome = yield* engine.executeWithPause(code, { integrations });
+        const outcome = yield* engine.executeWithPause(code, { integrations, headerContext });
         debugLog("execute.paused_flow_result", {
           status: outcome.status,
           executionId: outcome.status === "paused" ? outcome.execution.id : undefined,
@@ -1466,6 +1532,7 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
         "execute",
         {
           description,
+          _meta: { [HEADER_CONTEXT_META_KEY]: { version: 1 } },
           inputSchema: {
             code: z.string().trim().min(1),
             integrations: z
@@ -1477,7 +1544,11 @@ export const createExecutorMcpServer = <E extends Cause.YieldableError>(
               ),
           },
         },
-        ({ code, integrations }, extra) => runToolEffect(executeCode(code, extra, integrations)),
+        ({ code, integrations }, extra) => {
+          const parsed = parseHeaderContext(extra._meta);
+          if (!parsed.ok) return headerContextErrorResult(parsed.message);
+          return runToolEffect(executeCode(code, extra, integrations, parsed.headerContext));
+        },
       ),
     ).pipe(
       Effect.withSpan("mcp.host.register_tool", {
