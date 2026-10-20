@@ -1155,19 +1155,22 @@ export const graphqlPlugin = definePlugin((options?: GraphqlPluginOptions) => {
             handler: ({ args }) => {
               const input = args as typeof StaticGetIntegrationInputSchema.Type;
               return Effect.map(self.getIntegration(input.slug), (integration) => {
-                const config =
-                  integration === null
-                    ? null
-                    : Option.getOrNull(decodeGraphqlIntegrationConfigOption(integration));
+                if (integration === null) return ToolResult.ok({ integration: null });
+
+                const config = Option.getOrNull(decodeGraphqlIntegrationConfigOption(integration));
+                if (config === null) {
+                  return graphqlToolFailure(
+                    "invalid_integration_config",
+                    `Integration ${input.slug} has a config this tool cannot read; inspect it in the Executor UI.`,
+                  );
+                }
+
                 return ToolResult.ok({
-                  integration:
-                    config === null
-                      ? integration
-                      : {
-                          ...config,
-                          headers: redactStaticValues(config.headers),
-                          queryParams: redactStaticValues(config.queryParams),
-                        },
+                  integration: {
+                    ...config,
+                    headers: redactStaticValues(config.headers),
+                    queryParams: redactStaticValues(config.queryParams),
+                  },
                 });
               });
             },

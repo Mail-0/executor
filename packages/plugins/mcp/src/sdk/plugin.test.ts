@@ -10,6 +10,7 @@ import {
 import {
   AuthTemplateSlug,
   ConnectionName,
+  definePlugin,
   IntegrationSlug,
   OAuthClientSlug,
   ToolAddress,
@@ -39,6 +40,15 @@ import { makeAnnotationsMcpServer, serveMcpServer } from "../testing";
 // elicitation.test.ts + owner-isolation.test.ts.
 
 const TEMPLATE = AuthTemplateSlug.make("none");
+
+const rawConfigWriterPlugin = definePlugin(() => ({
+  id: "rawConfigWriter" as const,
+  storage: () => ({}),
+  extension: (ctx) => ({
+    writeConfig: (slug: string, config: unknown) =>
+      ctx.core.integrations.update(IntegrationSlug.make(slug), { config }),
+  }),
+}))();
 
 const JsonRpcId = Schema.Union([Schema.String, Schema.Number, Schema.Null]);
 const JsonRpcRequest = Schema.Struct({
@@ -353,6 +363,34 @@ describe("mcpPlugin", () => {
         headers: { Authorization: headerValue },
         queryParams: { token: queryValue },
       });
+    }),
+  );
+
+  it.effect("fails closed when getServer cannot parse a stored config", () =>
+    Effect.gen(function* () {
+      const executor = yield* createExecutor(
+        makeTestConfig({ plugins: [mcpPlugin(), rawConfigWriterPlugin] as const }),
+      );
+      const secretHeaderValue = "Bearer invalid-mcp-config-secret";
+      const slug = "invalid_config_mcp";
+      yield* executor.mcp.addServer({
+        name: "Invalid config",
+        endpoint: "http://127.0.0.1:1/mcp",
+        slug,
+      });
+      yield* executor.rawConfigWriter.writeConfig(slug, {
+        headers: { Authorization: secretHeaderValue },
+      });
+
+      const result = yield* executor.execute(ToolAddress.make("executor.mcp.getServer"), {
+        slug,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "invalid_integration_config" },
+      });
+      expect(JSON.stringify(result)).not.toContain(secretHeaderValue);
     }),
   );
 

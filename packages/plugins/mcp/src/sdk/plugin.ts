@@ -1644,23 +1644,27 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
             execute: (input) => {
               const args = input as typeof McpGetServerInputSchema.Type;
               return Effect.map(self.getServer(args.slug), (integration) => {
-                const config = integration ? parseMcpIntegrationConfig(integration.config) : null;
+                if (integration === null) return ToolResult.ok({ integration: null });
+
+                const config = parseMcpIntegrationConfig(integration.config);
+                if (config === null) {
+                  return mcpToolFailure(
+                    "invalid_integration_config",
+                    `Integration ${args.slug} has a config this tool cannot read; inspect it in the Executor UI.`,
+                  );
+                }
+
                 const redactedConfig =
-                  config === null
-                    ? undefined
-                    : config.transport === "remote"
-                      ? {
-                          ...config,
-                          headers: redactStaticValues(config.headers),
-                          queryParams: redactStaticValues(config.queryParams),
-                        }
-                      : { ...config, env: redactStaticValues(config.env) };
+                  config.transport === "remote"
+                    ? {
+                        ...config,
+                        headers: redactStaticValues(config.headers),
+                        queryParams: redactStaticValues(config.queryParams),
+                      }
+                    : { ...config, env: redactStaticValues(config.env) };
 
                 return ToolResult.ok({
-                  integration:
-                    integration && redactedConfig
-                      ? { ...integration, config: redactedConfig }
-                      : integration,
+                  integration: { ...integration, config: redactedConfig },
                 });
               });
             },
