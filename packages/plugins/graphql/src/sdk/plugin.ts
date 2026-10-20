@@ -27,6 +27,7 @@ import {
 } from "@executor-js/sdk/core";
 
 import {
+  redactStaticValues,
   TOKEN_VARIABLE,
   describeApiKeyAuthMethod,
   describeNoneAuthMethod,
@@ -1148,14 +1149,27 @@ export const graphqlPlugin = definePlugin((options?: GraphqlPluginOptions) => {
           {
             name: "getIntegration",
             description:
-              "Inspect an existing GraphQL integration, including endpoint, static headers/query params, and auth templates. Use this before repairing an integration with `graphql.configure` or creating a connection.",
+              "Inspect an existing GraphQL integration, including endpoint and auth templates. Static header and query-parameter values are redacted. Use this before repairing an integration with `graphql.configure` or creating a connection.",
             inputSchema: StaticGetIntegrationInputStandardSchema,
             outputSchema: StaticGetIntegrationOutputStandardSchema,
             handler: ({ args }) => {
               const input = args as typeof StaticGetIntegrationInputSchema.Type;
-              return Effect.map(self.getIntegration(input.slug), (integration) =>
-                ToolResult.ok({ integration }),
-              );
+              return Effect.map(self.getIntegration(input.slug), (integration) => {
+                const config =
+                  integration === null
+                    ? null
+                    : Option.getOrNull(decodeGraphqlIntegrationConfigOption(integration));
+                return ToolResult.ok({
+                  integration:
+                    config === null
+                      ? integration
+                      : {
+                          ...config,
+                          headers: redactStaticValues(config.headers),
+                          queryParams: redactStaticValues(config.queryParams),
+                        },
+                });
+              });
             },
           },
           {

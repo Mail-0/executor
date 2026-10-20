@@ -15,6 +15,7 @@ import {
   ToolAddress,
   createExecutor,
 } from "@executor-js/sdk";
+import { REDACTED_STATIC_VALUE } from "@executor-js/sdk/http-auth";
 import {
   makeTestConfig,
   memoryCredentialsPlugin,
@@ -311,6 +312,47 @@ describe("mcpPlugin", () => {
       expect(executor.mcp.probeEndpoint).toBeTypeOf("function");
       expect(executor.oauth.start).toBeTypeOf("function");
       expect(executor.oauth.complete).toBeTypeOf("function");
+    }),
+  );
+
+  it.effect("redacts static values from the agent-facing getServer tool only", () =>
+    Effect.gen(function* () {
+      const executor = yield* createExecutor(makeTestConfig({ plugins: [mcpPlugin()] as const }));
+      const headerValue = "Bearer secret-value";
+      const queryValue = "secret-query-value";
+      yield* executor.mcp.addServer({
+        name: "Static values",
+        endpoint: "http://127.0.0.1:1/mcp",
+        slug: "static_values",
+        headers: { Authorization: headerValue },
+        queryParams: { token: queryValue },
+      });
+
+      const result = yield* executor.execute(ToolAddress.make("executor.mcp.getServer"), {
+        slug: "static_values",
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        data: {
+          integration: {
+            config: {
+              headers: { Authorization: REDACTED_STATIC_VALUE },
+              queryParams: { token: REDACTED_STATIC_VALUE },
+            },
+          },
+        },
+      });
+      const serialized = JSON.stringify(result);
+      expect(serialized).toContain("Authorization");
+      expect(serialized).toContain("token");
+      expect(serialized).not.toContain("secret-value");
+      expect(serialized).not.toContain(queryValue);
+
+      const integration = yield* executor.mcp.getServer("static_values");
+      expect(integration?.config).toMatchObject({
+        headers: { Authorization: headerValue },
+        queryParams: { token: queryValue },
+      });
     }),
   );
 

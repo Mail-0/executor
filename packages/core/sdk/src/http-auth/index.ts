@@ -14,6 +14,8 @@ export {
   type RenderedAuthPlacements,
 } from "./auth-method";
 
+export { REDACTED_STATIC_VALUE, redactStaticValues } from "./redact-static-values";
+
 // Request-shaped authoring dialect — accepted on every plugin's auth inputs,
 // normalized to canonical placements at the boundary.
 export {

@@ -33,6 +33,7 @@ import {
 } from "@executor-js/sdk/core";
 
 import {
+  redactStaticValues,
   TOKEN_VARIABLE,
   describeApiKeyAuthMethod,
   describeNoneAuthMethod,
@@ -1637,14 +1638,31 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
           tool({
             name: "getServer",
             description:
-              "Inspect a registered MCP integration, including transport, endpoint/command, and auth template. Use this before creating a connection (`connections.create` / `oauth.start`).",
+              "Inspect a registered MCP integration, including transport, endpoint/command, and auth template. Static header, query-parameter, and legacy environment values are redacted. Use this before creating a connection (`connections.create` / `oauth.start`).",
             inputSchema: McpGetServerInputStandardSchema,
             outputSchema: McpGetServerOutputStandardSchema,
             execute: (input) => {
               const args = input as typeof McpGetServerInputSchema.Type;
-              return Effect.map(self.getServer(args.slug), (integration) =>
-                ToolResult.ok({ integration }),
-              );
+              return Effect.map(self.getServer(args.slug), (integration) => {
+                const config = integration ? parseMcpIntegrationConfig(integration.config) : null;
+                const redactedConfig =
+                  config === null
+                    ? undefined
+                    : config.transport === "remote"
+                      ? {
+                          ...config,
+                          headers: redactStaticValues(config.headers),
+                          queryParams: redactStaticValues(config.queryParams),
+                        }
+                      : { ...config, env: redactStaticValues(config.env) };
+
+                return ToolResult.ok({
+                  integration:
+                    integration && redactedConfig
+                      ? { ...integration, config: redactedConfig }
+                      : integration,
+                });
+              });
             },
           }),
           tool({
