@@ -11,12 +11,14 @@ import {
 import {
   AuthTemplateSlug,
   ConnectionName,
+  definePlugin,
   IntegrationSlug,
   ProviderItemId,
   ProviderKey,
   ToolAddress,
   createExecutor,
 } from "@executor-js/sdk";
+import { REDACTED_STATIC_VALUE } from "@executor-js/sdk/http-auth";
 import {
   makeTestConfig,
   serveTestHttpApp,
@@ -114,6 +116,15 @@ const introspectionResult: IntrospectionResult = {
 
 const introspectionJson = JSON.stringify({ data: introspectionResult });
 const serveGreetingServer = serveGraphqlTestServer({ schema: makeGreetingGraphqlSchema() });
+
+const rawConfigWriterPlugin = definePlugin(() => ({
+  id: "rawConfigWriter" as const,
+  storage: () => ({}),
+  extension: (ctx) => ({
+    writeConfig: (slug: string, config: unknown) =>
+      ctx.core.integrations.update(IntegrationSlug.make(slug), { config }),
+  }),
+}))();
 
 const makeExecutor = () =>
   createExecutor(
@@ -1118,6 +1129,75 @@ describe("graphqlPlugin", () => {
 
       const integration = yield* executor.integrations.get(IntegrationSlug.make("via_static"));
       expect(integration).not.toBeNull();
+    }),
+  );
+
+  it.effect("redacts static values from the agent-facing getIntegration tool only", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeExecutor();
+      const headerValue = "Bearer secret-value";
+      const queryValue = "secret-query-value";
+      yield* executor.graphql.addIntegration({
+        endpoint: "http://127.0.0.1:1/graphql",
+        slug: "static_redaction",
+        headers: { Authorization: headerValue },
+        queryParams: { token: queryValue },
+      });
+
+      const result = yield* executor.execute(ToolAddress.make("executor.graphql.getIntegration"), {
+        slug: "static_redaction",
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        data: {
+          integration: {
+            headers: { Authorization: REDACTED_STATIC_VALUE },
+            queryParams: { token: REDACTED_STATIC_VALUE },
+          },
+        },
+      });
+      const serialized = JSON.stringify(result);
+      expect(serialized).toContain("Authorization");
+      expect(serialized).toContain("token");
+      expect(serialized).not.toContain("secret-value");
+      expect(serialized).not.toContain(queryValue);
+
+      const integration = yield* executor.graphql.getIntegration("static_redaction");
+      expect(integration).toMatchObject({
+        headers: { Authorization: headerValue },
+        queryParams: { token: queryValue },
+      });
+    }),
+  );
+
+  it.effect("fails closed when getIntegration cannot decode a stored config", () =>
+    Effect.gen(function* () {
+      const config = makeTestConfig({
+        plugins: [memoryCredentialsPlugin(), graphqlPlugin(), rawConfigWriterPlugin] as const,
+      });
+      const executor = yield* createExecutor(config);
+      const secretHeaderValue = "Bearer invalid-graphql-config-secret";
+      const slug = "invalid_config_graphql";
+      yield* executor.graphql.addIntegration({
+        endpoint: "http://127.0.0.1:1/graphql",
+        slug,
+      });
+      yield* executor.rawConfigWriter.writeConfig(slug, {
+        headers: { Authorization: secretHeaderValue },
+      });
+
+      const result = yield* executor.execute(ToolAddress.make("executor.graphql.getIntegration"), {
+        slug,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "invalid_integration_config" },
+      });
+      expect(JSON.stringify(result)).not.toContain(secretHeaderValue);
+
+      yield* executor.close();
+      yield* Effect.promise(() => config.testDb.close());
     }),
   );
 

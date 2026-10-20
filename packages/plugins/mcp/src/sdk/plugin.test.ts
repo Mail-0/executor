@@ -10,11 +10,13 @@ import {
 import {
   AuthTemplateSlug,
   ConnectionName,
+  definePlugin,
   IntegrationSlug,
   OAuthClientSlug,
   ToolAddress,
   createExecutor,
 } from "@executor-js/sdk";
+import { REDACTED_STATIC_VALUE } from "@executor-js/sdk/http-auth";
 import {
   makeTestConfig,
   memoryCredentialsPlugin,
@@ -38,6 +40,15 @@ import { makeAnnotationsMcpServer, serveMcpServer } from "../testing";
 // elicitation.test.ts + owner-isolation.test.ts.
 
 const TEMPLATE = AuthTemplateSlug.make("none");
+
+const rawConfigWriterPlugin = definePlugin(() => ({
+  id: "rawConfigWriter" as const,
+  storage: () => ({}),
+  extension: (ctx) => ({
+    writeConfig: (slug: string, config: unknown) =>
+      ctx.core.integrations.update(IntegrationSlug.make(slug), { config }),
+  }),
+}))();
 
 const JsonRpcId = Schema.Union([Schema.String, Schema.Number, Schema.Null]);
 const JsonRpcRequest = Schema.Struct({
@@ -311,6 +322,75 @@ describe("mcpPlugin", () => {
       expect(executor.mcp.probeEndpoint).toBeTypeOf("function");
       expect(executor.oauth.start).toBeTypeOf("function");
       expect(executor.oauth.complete).toBeTypeOf("function");
+    }),
+  );
+
+  it.effect("redacts static values from the agent-facing getServer tool only", () =>
+    Effect.gen(function* () {
+      const executor = yield* createExecutor(makeTestConfig({ plugins: [mcpPlugin()] as const }));
+      const headerValue = "Bearer secret-value";
+      const queryValue = "secret-query-value";
+      yield* executor.mcp.addServer({
+        name: "Static values",
+        endpoint: "http://127.0.0.1:1/mcp",
+        slug: "static_values",
+        headers: { Authorization: headerValue },
+        queryParams: { token: queryValue },
+      });
+
+      const result = yield* executor.execute(ToolAddress.make("executor.mcp.getServer"), {
+        slug: "static_values",
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        data: {
+          integration: {
+            config: {
+              headers: { Authorization: REDACTED_STATIC_VALUE },
+              queryParams: { token: REDACTED_STATIC_VALUE },
+            },
+          },
+        },
+      });
+      const serialized = JSON.stringify(result);
+      expect(serialized).toContain("Authorization");
+      expect(serialized).toContain("token");
+      expect(serialized).not.toContain("secret-value");
+      expect(serialized).not.toContain(queryValue);
+
+      const integration = yield* executor.mcp.getServer("static_values");
+      expect(integration?.config).toMatchObject({
+        headers: { Authorization: headerValue },
+        queryParams: { token: queryValue },
+      });
+    }),
+  );
+
+  it.effect("fails closed when getServer cannot parse a stored config", () =>
+    Effect.gen(function* () {
+      const executor = yield* createExecutor(
+        makeTestConfig({ plugins: [mcpPlugin(), rawConfigWriterPlugin] as const }),
+      );
+      const secretHeaderValue = "Bearer invalid-mcp-config-secret";
+      const slug = "invalid_config_mcp";
+      yield* executor.mcp.addServer({
+        name: "Invalid config",
+        endpoint: "http://127.0.0.1:1/mcp",
+        slug,
+      });
+      yield* executor.rawConfigWriter.writeConfig(slug, {
+        headers: { Authorization: secretHeaderValue },
+      });
+
+      const result = yield* executor.execute(ToolAddress.make("executor.mcp.getServer"), {
+        slug,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "invalid_integration_config" },
+      });
+      expect(JSON.stringify(result)).not.toContain(secretHeaderValue);
     }),
   );
 
